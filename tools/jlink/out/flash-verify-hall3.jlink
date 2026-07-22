@@ -1,0 +1,22 @@
+si SWD
+speed 1000
+device STM32G474RC
+connect
+r
+h
+erase
+r
+h
+loadfile F:\Project\ChangeoTEC\ReluctanceMotorDriver\code\IF-ABZ\build\Debug\IF-ABZ.elf
+r
+g
+sleep 500
+h
+mem32 0x24000000 20
+r
+g
+sleep 500
+h
+mem32 0x24000000 20
+g
+q

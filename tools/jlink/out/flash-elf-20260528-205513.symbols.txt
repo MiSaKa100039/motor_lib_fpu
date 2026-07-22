@@ -1,0 +1,11 @@
+ELF: F:\Project\ChangeoTEC\ReluctanceMotorDriver\code\IF-ABZ\build\Debug\IF-ABZ.elf
+HEX: F:\Project\ChangeoTEC\ReluctanceMotorDriver\code\IF-ABZ\tools\jlink\out\IF-ABZ-20260528-205513.hex
+BIN: F:\Project\ChangeoTEC\ReluctanceMotorDriver\code\IF-ABZ\tools\jlink\out\IF-ABZ-20260528-205513.bin
+Generated: 2026-05-28T20:55:13.2385622+08:00
+
+_sidata              0x080100EC
+_sdata               0x20000000
+_edata               0x2000027C
+SystemCoreClock      0x20000220
+uwTickPrio           0x20000224
+uwTickFreq           0x20000228

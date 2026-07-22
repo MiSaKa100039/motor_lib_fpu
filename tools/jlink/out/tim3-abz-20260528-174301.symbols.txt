@@ -1,0 +1,25 @@
+ELF: F:\Project\ChangeoTEC\ReluctanceMotorDriver\code\IF-ABZ\build\Debug\IF-ABZ.elf
+Generated: 2026-05-28T17:43:01.4656933+08:00
+
+BSP_ABZ_Debug_InitStatus         0x20000030
+BSP_ABZ_Debug_ZStatus            0x20000034
+BSP_ABZ_Debug_ZPulseCount        0x200005C0
+BSP_ABZ_Debug_ZLastCount         0x200005C4
+BSP_ABZ_Debug_ZLastTick          0x200005C8
+BSP_ABZ_Debug_RawCount           0x200005CC
+BSP_ABZ_Debug_Stage              0x200005D0
+CMD                              0x20000681
+USER_INIT_STAGE                  0x20000682
+USER_LOOP_COUNT                  0x20000684
+USER_LAST_CMD                    0x20000688
+USER_LAST_RESULT                 0x2000068C
+SystemCoreClock                  0x20000228
+uwTickPrio                       0x2000022C
+uwTickFreq                       0x20000230
+uwTick                           0x20000690
+_sidata                          0x0800FEC0
+_sdata                           0x20000000
+_edata                           0x20000284
+htim3                            0x20000424
+_ZL5g_abz                        0x20000654
+_ZL17g_abz_initialized           0x20000680

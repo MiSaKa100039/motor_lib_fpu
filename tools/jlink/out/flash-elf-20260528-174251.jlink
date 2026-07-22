@@ -1,0 +1,11 @@
+si SWD
+speed 4000
+device STM32G474RC
+connect
+r
+h
+loadbin F:\Project\ChangeoTEC\ReluctanceMotorDriver\code\IF-ABZ\tools\jlink\out\IF-ABZ-20260528-174251.bin, 0x08000000
+mem32 0x0800FEC0 180
+r
+g
+q

@@ -1,0 +1,6 @@
+"D:\SoftWare\CLion 2026.1.1\bin\cmake\win\x64\bin\cmake.exe" -DCMAKE_BUILD_TYPE=Debug "-DCMAKE_MAKE_PROGRAM=D:/SoftWare/CLion 2026.1.1/bin/ninja/win/x64/ninja.exe" -G Ninja -S D:\DevBords\Stm32\AXDR-L\Demo\motor_lib -B D:\DevBords\Stm32\AXDR-L\Demo\motor_lib\build\Debug
+Build type: Debug
+-- Motor library source set: FULL
+-- Configuring done (0.1s)
+-- Generating done (0.2s)
+-- Build files have been written to: D:/DevBords/Stm32/AXDR-L/Demo/motor_lib/build/Debug

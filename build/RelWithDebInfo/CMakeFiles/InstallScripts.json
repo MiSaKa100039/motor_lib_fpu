@@ -1,0 +1,8 @@
+{
+	"InstallScripts" : 
+	[
+		"D:/DevBords/Stm32/AXDR-L/Demo/motor_lib/build/RelWithDebInfo/cmake_install.cmake",
+		"D:/DevBords/Stm32/AXDR-L/Demo/motor_lib/build/RelWithDebInfo/cmake/stm32cubemx/cmake_install.cmake"
+	],
+	"Parallel" : false
+}
