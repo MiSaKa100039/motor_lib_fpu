@@ -1,0 +1,15 @@
+/build/
+/build-host/
+/cmake-build-*/
+/.codex-build/
+/.idea/
+/.vscode/
+/CMakeUserPresets.json
+/Debug/Logs/*
+!/Debug/Logs/.gitkeep
+/Debug/*.log
+*.map
+*.hex
+*.bin
+*.elf
+/tools/jlink/out/

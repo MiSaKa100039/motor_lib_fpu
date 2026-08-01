@@ -1,0 +1,196 @@
+高级应用场景实现总结(给 Codex 用)
+========================================
+
+## 一、整体阶段背景
+
+针对高级应用(3D 打印机 XY、贴片机、机械臂关节、机器狗关节), 在原有单轴 FOC lib 基础上分阶段推进:
+
+- Phase 1(架构转型): 删除原 TaskFSM 的"任务/队列"语义, 引入 writeSetpoint 流式 API + StreamState 流临停状态机。
+- Phase 2(能力升级): BuildCfg 控制模式能力原子 + 位置环接通 + 速度前馈 + IMPEDANCE 占位 + HELD 占位 + FIFO/trigger 占位。
+- Phase 2.5(收尾): 修 MotorAPI::start() 漏 POSITION 入口的真 bug + 文档化 + TODO 标签。
+- 当前已生成: 由用户在 UserAPP/App/ 自行加了应用层协调骨架(Core/Axis/Motion/Energy/Sync)。
+
+
+## 二、已实现的功能(高级应用相关)
+
+### 1. lib API 层(Lib/Motor/Public/Motor_API.h)
+
+- 流式核心 API MotorAPI::writeSetpoint(const MotionSetpoint&) — 每拍覆盖无任务无完成判据, 多轴同步由此 API 入口
+- 语法糖 3 个 setTargetTorque/Speed/Position — 等价单字段 writeSetpoint
+- Phase 3 分布式同步占位 API appendSetpointSeg/triggerSegPlayback/abortSegPlayback — 永远返 NotSupported
+- 查询/调参/校准/调试 API — selectMode/getState/getFault/getMonitorData/setPIDGains/setRunPolicy/startRLIdentification/lockDebug 等 38 个公共 API
+- Phase 2 调用顺序约束 — writeSetpoint 仅写 ctx_ 不切 mode, 上层必须先 selectMode → start → writeSetpoint
+
+### 2. lib 控制环(Lib/Motor/Core/Runtime/Motor_ManagerRuntime.cpp)
+
+- 位置环已接通:
+    pos_err = target_pos_rad - angle_mech_sensor
+    speed_ref = pid_position.update(pos_err) + vel_ff_rad_s * vel_ff_gain  (BuildCfg 双闸控)
+    speed_ref_limited = limitSpeedReference(speed_ref)
+    speed_err = speed_ref_limited - speed_rpm
+    iq_ref = pid_speed.update(speed_err)
+
+- 堵转保护在位置环也生效(与 VELOCITY_CONTROL 同走 updateStallProtection)
+- IMPEDANCE 控制环占位: BuildCfg 开启时编进固件, 但 iq_ref=0。Phase 3 接通公式
+    iq_ref = K*(pos_ref-θ) - D*(-ω) + torque_bias + torque_ff, 钳位 ±torque_limit
+
+### 3. lib 数据结构
+
+- MotionSetpoint { mode, pos_ref, vel_ff, torque_ff, stiffness, damping, torque_bias, torque_limit, hold_when_idle }
+  9 字段覆盖 TORQUE/VELOCITY/POSITION/IMPEDANCE 四模式
+- MotorFeedforwardParam { enable_vel_ff, enable_torque_ff, vel_ff_gain, torque_ff_gain } — 前馈通道运行期开关
+- MotorImpedanceParam { default_stiffness, default_damping, torque_bias_default, max_torque_a } — Phase 3 默认值占位
+- MotorPhysicalParam 加 load_inertia / gear_ratio / torque_constant — 机器狗/机械臂预留
+- PlaybackTrigger { IMMEDIATE, AWAIT_SYNC } — Phase 3 触发语义定义
+- StreamState { NONE, ACTIVE, SUSPENDED_BY_FAULT, SUSPENDED_BY_USER, HELD, FAULTED_LATCHED } — 取代旧 TaskState
+
+### 4. lib 状态机
+
+- Motor_StreamFSM 取代旧 Motor_TaskFSM, 描述流临停状态
+- ACTIVE → SUSPENDED_BY_FAULT 在 fault 注入时
+- ACTIVE → SUSPENDED_BY_USER 在 stop()/emergencyStop()
+- ACTIVE → HELD 在 buildcfg HOLD 开启时距 last_setpoint_tick 超 hold_timeout_ticks
+- 配套 MotorMotionParam.hold_timeout_ticks 字段
+
+### 5. lib BuildCfg 能力原子(Platform/Motor/BuildCfg/Platform_MotorBuildCfg.h)
+
+- 控制模式: MOTOR_BUILD_ENABLE_TORQUE/VELOCITY/POSITION/IMPEDANCE_CONTROL
+- 前馈通道: MOTOR_BUILD_ENABLE_VELOCITY/TORQUE_FEEDFORWARD
+- 流持仓安全: MOTOR_BUILD_ENABLE_STREAM_HOLD_WHEN_IDLE
+- FIFO 回放: MOTOR_BUILD_ENABLE_SETPOINT_FIFO_PLAYBACK(Phase 3 占位)
+- BuildCfg 顶部提供 能力原子 ↔ 产品形态 对照表(风扇/EV/打印机/机械臂/机器狗/分布式多 MCU)
+
+### 6. lib 编译期裁切
+
+- Motor_FeatureRegistry::supportsMode(Mode) 按 BuildCfg 返回 true/false
+- MotorCommandGuard::validateModeSelection 拒 BuildCfg 关闭的模式
+- Motor_LifecycleFSM::classifyStartRequest 接 POSITION/IMPEDANCE 进 Control
+- MotorAPI::start() switch 分派 POSITION/IMPEDANCE 入口(Phase 2.5 修复)
+- computeIqReference 位置分支用 #if LIB_MOTOR_ENABLE_POSITION_CONTROL 包, IMPEDANCE 分支用 #if LIB_MOTOR_ENABLE_IMPEDANCE_CONTROL 包
+
+### 7. Templates/Coordinator/(lib 之外的应用范例)
+
+- SyncedAxisGroup_Template.h/cpp — 分布式主机端协调器抽象基类 + CommBus 纯虚接口 + AxisHandle(LocalAxis/RemoteAxis)
+- DualAxisSinDemo.h — 双轴 sin/cos 圆轨迹 demo, 验证 XY 走斜线/圆
+- README.md — 调用序与形态讲解(单 MCU vs 多 MCU 分布式)
+
+### 8. UserAPP/App/(用户自建应用层骨架)
+
+- App_BuildConfig.h — App 自有裁切开关(USERAPP_ENABLE_SETPOINT_STREAM/MOTION/ENERGY/SYNC_COORDINATOR), 与 lib BuildCfg 解耦
+- App_Core/AppCommand + AppCommandInbox — 通信层只-post 主循环消费的工业纪律
+- App_AxisService — 包装 MotorAPI, cache setpoint + tickMotionStream 重写每拍(配合 lib HELD)
+- App_MotionCoordinator — 多轴单 MCU 同 tick 分发 writeSetpoint
+- App_EnergyCoordinator — BMS/制动电阻/回收比例 → lib setEnergyBudget 10Hz 刷新
+- App_SyncCoordinator — 预加载帧 FIFO + trigger_tick + 1kHz 回放, 单 MCU 同步可用, 多 MCU 路径待 Phase 3 接 CommBus
+
+
+## 三、代码中预留的占位清单
+
+### lib 内核心占位
+
+| 占位项 | 文件位置 | 状态 | Phase 3 启用条件 |
+|---|---|---|---|
+| MotorManager::appendSetpointSeg | Motor_ManagerAPI.cpp:163 | return NotSupported | BuildCfg MOTOR_BUILD_ENABLE_SETPOINT_FIFO_PLAYBACK |
+| MotorManager::triggerSegPlayback | Motor_ManagerAPI.cpp:175 | 同上 | 同 |
+| MotorManager::abortSegPlayback | Motor_ManagerAPI.cpp:185 | 同上 | 同 |
+| IMPEDANCE 控制律 | Motor_ManagerRuntime.cpp:163 | iq_ref=0 占位 | BuildCfg MOTOR_BUILD_ENABLE_IMPEDANCE_CONTROL + 真实公式实现 |
+| 力矩前馈速度环叠加 | Motor_ManagerRuntime.cpp (VELOCITY 分支未消费 torque_ff) | 字段已存, 未加进 iq_ref | BuildCfg MOTOR_BUILD_ENABLE_TORQUE_FEEDFORWARD |
+| controller_.pid_position IMPEDANCE 时复用 | Motor_Control.h:45 注释 | Phase 3 把 Kp=stiffness/torque_constant, Kd=damping/torque_constant | 同 IMPEDANCE |
+| HELD 状态冻结 target_pos_rad | Motor_StreamFSM.cpp:31 注释 | 仅切状态, 不写 ctx_ | BuildCfg MOTOR_BUILD_ENABLE_STREAM_HOLD_WHEN_IDLE |
+| MotorPhysicalParam.load_inertia/torque_constant | Motor_Config.h:42 | 字段已存未消费 | Phase 3 IMPEDANCE 折算 |
+| kv_rating 相电阻电感 | Motor_Config.h:42 | 历史占位 | 未消费 |
+| flying_start_mode = AUTO_DETECT | Motor_ConfigCheck.cpp:624 | P3 占位返未实现 | Phase 3 |
+| 高级观测器 NONLINEAR_FLUX/LUENBERGER/EKF | Motor_Definitions.h:545-547 | 仅枚举, 无实现 | 未规划 |
+| FUSION 角度状态 | Motor_Definitions.h:301 | 预留, 无实现 | 未规划 |
+| default_control_method/setModulation | Motor_API.cpp:461/485 | 仅 FOC/SVPWM 实现 | 未规划 |
+| 持久化 HAL 接口 | Motor_HAL_Interface.h:32 | Flash 持久预占位 | 未规划 |
+| debugPWMManual 等危险 API | Motor_API.h:158-177 | ENABLE_DANGEROUS_TEST_API 闸控 | 调试期使用 |
+
+### lib 内 TODO HostTest 标签(5 处)
+
+1. Motor_StreamFSM.cpp:17 — ACTIVE→HELD/fault/stop 切换
+2. Motor_ManagerRuntime.cpp:125 — 位置环方向 + vel_ff 叠加方向
+3. Motor_CommandGuard.cpp:145 — POSITION 入口门控(HIGH_RES_ENCODER 通过/HALL 拒)
+4. Motor_ManagerAPI.cpp:57 — writeSetpoint 各 mode 字段落地
+5. Motor_FeatureRegistry.cpp:80 — BuildCfg 关 IMPEDANCE 时 supportsMode 返回值
+
+### Templates/Coordinator/ TODO
+
+- SyncedAxisGroup_Template.cpp:51 — TODO Phase 3: appendSetpointSeg(&sp, 1)
+- SyncedAxisGroup_Template.cpp:57 — Phase 3: comm_->sendSegment(...)
+- SyncedAxisGroup_Template.cpp:74 — TODO Phase 3: triggerSegPlayback(IMMEDIATE)
+
+### App 层占位
+
+- App_EnergyCoordinator::tick10Hz 注释 input_ 缓冲已存未消费(BMS 通信层未接入)
+- App_SyncCoordinator 仅 LocalAxis 未含 RemoteAxis 分发路径
+- 通信层入口未连接(BSP/Communication → App_PostCommand 链路待真硬件接入)
+
+
+## 四、还缺失的部分 / Phase 3 待办
+
+### 关键缺口(按风险排序)
+
+1. lib PID BuildCfg 裁切不彻底: Motor_Control.h:38-43 的 pid_speed/pid_position 4 个 PID 实例全部无条件实例化,
+   BuildCfg 关 POSITION 也占 RAM ~60-80B。心智模型错位, 占用浪费。待 Phase 2.7 修。
+2. 真硬件验证零: 位置环方向(极性)、vel_ff 叠加方向、IMPEDANCE 公式均未现场验证。
+   仅 VOFA 通道缺位(MonitorData 未暴露 target_pos_rad 等)。
+3. 测试基础设施零: 无 host unit test / 无 on-target test。tools/host_test/README.md 占位, 待装 LLVM MinGW 后建。
+4. App 查询接口未包: App_AxisService 缺 getState/getFault/getMonitorData 转发,
+   Usermain 当前绕过 App 层直接调 Global_Motor_0。
+5. AppCommand 调参类未包: SET_PID_GAINS/SET_RUN_POLICY/SET_CONTROL_METHOD/SET_MODULATION/SET_DRAG_CURRENT
+   未支持, 上位机无法远程调参。
+6. App 多轴多 MCU 路径未完整: APP_MAX_AXES=1, 多轴要扩; App_Sync 仅本地分发, RemoteAxis + CommBus 抽象未建。
+7. IMPEDANCE 控制环公式未实现: 占位 iq_ref=0。
+8. torque_ff 速度环叠加未实现: 字段已存, 控制环没消费。
+9. FIFO 回放 lib 内 SetpointFifo 状态机未建: API 占位返 NotSupported。
+10. CMake HostTest preset 未建: 等 LLVM MinGW 装好后再加。
+11. CAN/EtherCAT 通信层 BSP 未建: 当前 BSP/Communication 仅 VOFA, 协议层完全空白。
+12. 5 处用户测试配置: User_MotorTestConfig.h 等可调出多种调试模式,
+    Phase 2 新加的 POSITION_CONTROL 缺一个对应的测试配置入口。
+
+
+## 五、后续 Plan 路线(按依赖关系)
+
+### Phase 2.7(配置/调参收尾, 短期)
+
+- 修 Motor_Control.h PID 实例化 BuildCfg 包裹(pid_speed/pid_position)
+- 同步 setPIDGains BuildCfg 守护
+- App_AxisService 加 getter 转发(查询 API 走 App 层)
+- AppCommandType 扩 5 个调参命令
+- 多 Product preset 编译验证(临时改 BuildCfg 编 4 次)
+
+### Phase 3.0(机器狗线启动, 长期)
+
+- computeIqReference 实 IMPEDANCE 公式
+- torque_ff 速度环叠加
+- pid_position 复用 IMPEDANCE stiffness/damping 折算
+- lib 内 SetpointFifo + trigger latch 状态机
+- 真接 CAN/EtherCAT 通信 BSP → App_Sync 扩 RemoteAxis 分发
+
+### Phase 3.X(测试基础设施, 并行)
+
+- Host test: LLVM MinGW + 自写 runner + HAL mock + 8 个 test_*.cpp 覆盖 TODO HostTest
+- On-target test: 测试代码编入 .elf, STM32 跑后 VOFA/串口报 PASS/FAIL
+- 真硬件故障注入测试: 传感器断线、堵转-恢复、瞬时过流
+
+### Phase 4(可选, 长期)
+
+- 持久化 HAL 接口接 Flash 驱动
+- 高级观测器(NONLINEAR_FLUX/EKF)实现
+- 角度源 FUSION 平滑切换
+
+
+## 六、关键架构原则(用户对话中确立)
+
+1. lib 单轴边界永不破: 不能在 lib 内调多 MotorAPI 实例引用其他轴。多轴同步在 Coordinator 层。
+2. BuildCfg 按能力原子裁切, 不按产品名: 一个 BuildCfg 组合可同时服务多产品。
+3. 前馈建模完全在主机层: lib 的 VELOCITY_FEEDFORWARD 开关仅是 通道接入 开关, lib 做一行加法不做决策。
+4. 多轴同步两种形态:
+   - 单 MCU 多实例(风扇类): Coordinator 同 ISR tick 调多次 writeSetpoint
+   - 多 MCU 分布式(打印机/机器狗): 每轴一块 MCU 独立 lib, 经 CAN/EtherCAT 预加载 setpoint 段 + SYNC 触发
+5. TaskFSM 已退役: 改为 StreamState 描述流临停, 解耦 任务 与 流 概念。
+
+
+这份总结覆盖: 已做了什么、实现了哪些 API、哪些是占位、占位何时启用、还缺什么、Phase 3 路线。
+可作为 codex 后续操作的上下文基线。
