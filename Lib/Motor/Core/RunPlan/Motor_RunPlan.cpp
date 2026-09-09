@@ -16,7 +16,7 @@ RunPhase MotorRunPlan::selectInitialPhase(const MotorRunPolicy& policy,
         case SteadyAngleSource::SMO:
             if (policy.startup_source == StartupSource::IF)
             {
-                return RunPhase::ALIGNMENT;
+                return RunPhase::FORCE_DRAG;
             }
             if (policy.startup_source == StartupSource::HFI)
             {

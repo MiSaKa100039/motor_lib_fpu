@@ -1,6 +1,6 @@
 #include "../Manager/Motor_Manager.h"
 
-#include "../../Common/Math/FocMath.h"
+#include "../../Control/Utils/FocMath.h"
 
 #include "../../Control/Modulation_SVPWM.h"
 
@@ -19,14 +19,23 @@ namespace Lib_Motor
  * 安全: PWM 输出期间 ADC 和保护仍在运行
  * 警告: 无电流闭环, 需谨慎设置电压以防过流
  */
-#if LIB_MOTOR_ENABLE_DANGEROUS_TEST_API
+#if LIB_MOTOR_ENABLE_DEBUG_PWM_MANUAL
 void MotorManager::runPWMManual()
 {
+#if LIB_MOTOR_NUMERIC_BACKEND_FIXED_Q15
+    setPwmDutyQ15(FixedNumeric::DutyAbc{
+        ctx_.debug_pwm_manual_a,
+        ctx_.debug_pwm_manual_b,
+        ctx_.debug_pwm_manual_c});
+#else
     ctx_.duty_a = ctx_.test_u;
     ctx_.duty_b = ctx_.test_v;
     ctx_.duty_c = ctx_.test_w;
+#endif
 }
+#endif
 
+#if LIB_MOTOR_ENABLE_DEBUG_VF_CONTROL
 /*
  * runVFControl -- V/F 开环电压拖动
  *
@@ -47,6 +56,49 @@ void MotorManager::runPWMManual()
  */
 void MotorManager::runVFControl()
 {
+#if LIB_MOTOR_NUMERIC_BACKEND_FIXED_Q15
+    /* ================================================================
+     * [1] Q15 开环角度生成 (速度斜坡 + 相位积分)
+     * ================================================================ */
+    RuntimeSpeed target_rpm = ctx_.target_rpm;
+    RuntimeDuty duty = ctx_.vf_duty_bias;
+    const bool use_profile =
+        (mode_ == Mode::DEBUG_VF_DRAG && run_phase_ == RunPhase::RUN_DIRECT) &&
+        getDebugVFProfileCommand(target_rpm, duty);
+
+    ctx_.target_rpm = target_rpm;
+    ctx_.vf_duty_bias = runtimeClampDuty(duty, FixedNumeric::kQ15One);
+
+    const uint32_t ramp_ticks = use_profile ? 0U : ctx_.debug_ramp_ticks;
+    const uint32_t ramp_step =
+        use_profile ? 0U : ctx_.debug_ramp_speed_step_q15;
+    if_angle_gen_.setTargetSpeedQ15(target_rpm, ramp_ticks, ramp_step);
+    if_angle_gen_.updateQ15();
+
+    const FixedNumeric::phase_u32_t phase = if_angle_gen_.getAnglePhase();
+    const RuntimeSpeed speed_rpm = if_angle_gen_.getSpeedQ15();
+
+    ctx_.angle_elec_command = phase;
+    ctx_.angle_elec = ctx_.angle_elec_command;
+    ctx_.speed_rpm = speed_rpm;
+
+    /* ================================================================
+     * [2] 电压矢量和调制均按 Vbus 归一化 Q15 duty 处理
+     * ================================================================ */
+    const FixedNumeric::SinCos sc = FixedNumeric::sinCos(phase);
+    const FixedNumeric::Ab voltage{
+        FixedNumeric::multiplyQ15(ctx_.vf_duty_bias, sc.cos),
+        FixedNumeric::multiplyQ15(ctx_.vf_duty_bias, sc.sin)};
+
+    ctx_.v_alpha = voltage.alpha;
+    ctx_.v_beta  = voltage.beta;
+
+    const FixedNumeric::DutyAbc duty_abc =
+        (config_.control.modulation == ModulationMethod::SPWM)
+            ? FixedNumeric::spwmVbusNormalized(voltage)
+            : FixedNumeric::svpwmVbusNormalized(voltage);
+    setPwmDutyQ15(duty_abc);
+#else
     /* ================================================================
      * [1] 开环角度生成 (速度斜坡 + 积分)
      *
@@ -56,13 +108,17 @@ void MotorManager::runVFControl()
      *   - setTargetSpeed -> 设置 ramp_rate
      *   - update(dt) -> 速度斜坡 + 积分
      * ================================================================ */
-    float target_rpm = ctx_.target_rpm;
+    float target_rpm = runtimeSpeedToPhysical(ctx_, ctx_.target_rpm);
     float duty = ctx_.vf_duty_bias;
     bool use_profile =
         (mode_ == Mode::DEBUG_VF_DRAG && run_phase_ == RunPhase::RUN_DIRECT) &&
         getDebugVFProfileCommand(target_rpm, duty);
+    if (use_profile)
+    {
+        target_rpm = runtimeUserSpeedToInternalPhysical(config_, target_rpm);
+    }
 
-    ctx_.target_rpm = target_rpm;
+    ctx_.target_rpm = runtimeSpeedFromPhysical(ctx_, target_rpm);
     ctx_.vf_duty_bias = duty;
 
     float ramp_s = use_profile ? 0.0f : ctx_.debug_ramp_time_s;
@@ -79,14 +135,15 @@ void MotorManager::runVFControl()
     if (duty < 0.0f) duty = 0.0f;
     if (duty > 1.0f) duty = 1.0f;
 
-    float ct = cosf(angle);
-    float st = sinf(angle);
-    float v_bus = ctx_.v_bus;
+    float v_bus = runtimeBusVoltageToPhysical(ctx_, ctx_.v_bus);
     if (v_bus < 0.1f) v_bus = 0.1f;
 
-    ctx_.angle_elec_command = angle;
+    ctx_.angle_elec_command = runtimeAngleFromRadians(angle);
     ctx_.angle_elec = ctx_.angle_elec_command;
-    ctx_.speed_rpm  = speed_rpm;
+    ctx_.speed_rpm  = runtimeSpeedFromPhysical(ctx_, speed_rpm);
+
+    float ct = cosf(angle);
+    float st = sinf(angle);
     ctx_.v_alpha = duty * v_bus * ct;
     ctx_.v_beta  = duty * v_bus * st;
 
@@ -120,9 +177,11 @@ void MotorManager::runVFControl()
     ctx_.duty_a = 0.5f + u;
     ctx_.duty_b = 0.5f + v;
     ctx_.duty_c = 0.5f + w;
+#endif
 }
+#endif
 
-#if LIB_MOTOR_ENABLE_HFI
+#if LIB_MOTOR_ENABLE_DEBUG_HFI_OBSERVER
 void MotorManager::runHFIObserverTest()
 {
     const float theta_in = ctx_.hfi_estimate.angle_rad;
@@ -184,7 +243,9 @@ void MotorManager::runHFIObserverTest()
     ctx_.duty_b = duty[1];
     ctx_.duty_c = duty[2];
 }
+#endif
 
+#if LIB_MOTOR_ENABLE_DEBUG_HFI_ANY
 void MotorManager::runHFIShadowObserver(bool inject_voltage)
 {
     const float theta_in = ctx_.hfi_estimate.angle_rad;
@@ -230,24 +291,5 @@ void MotorManager::runHFIShadowObserver(bool inject_voltage)
     }
 }
 #endif
-#endif
-
-#if LIB_MOTOR_ENABLE_DANGEROUS_TEST_API && LIB_MOTOR_ENABLE_SMO
-void MotorManager::runSMOShadowObserver()
-{
-    smo_.update(ctx_.v_alpha, ctx_.v_beta,
-                ctx_.i_alpha, ctx_.i_beta,
-                dt_, &ctx_.smo_estimate);
-
-    ctx_.angle_elec_observer = ctx_.smo_estimate.angle_rad;
-    ctx_.speed_rpm_observer =
-        ctx_.smo_estimate.speed_rad_s * 60.0f /
-        (TWO_PI * config_.physical.pole_pairs);
-    event_.observer_converged = ctx_.smo_estimate.valid ? 1U : 0U;
-    event_.speed_valid = ctx_.smo_estimate.valid ? 1U : 0U;
-    angle_state_ = AngleState::SMO;
-}
-#endif
 
 } // namespace Lib_Motor
-

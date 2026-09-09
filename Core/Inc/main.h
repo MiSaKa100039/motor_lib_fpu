@@ -20,6 +20,7 @@ typedef enum
     LCA039_BOOT_STATUS_DATA_INIT_FAILED = (1U << 0),
     LCA039_BOOT_STATUS_BSS_INIT_FAILED = (1U << 1),
     LCA039_BOOT_STATUS_APPLICATION_INIT_FAILED = (1U << 2),
+    LCA039_BOOT_STATUS_ADC_INIT_FAILED = (1U << 3),
     LCA039_BOOT_STATUS_MOTOR_INIT_FAILED = LCA039_BOOT_STATUS_APPLICATION_INIT_FAILED
 } LCA039_BootStatus;
 
@@ -27,12 +28,38 @@ extern volatile uint32_t g_heartbeat;
 extern volatile LCA039_ClockStatus g_clock_status;
 extern volatile LCA039_BootStatus g_boot_status;
 
-extern volatile uint32_t Core_Motor_Tim1UpdateIrqCount;
-extern volatile uint32_t Core_Motor_AdcEocIrqCount;
-extern volatile uint32_t Core_Motor_AdcUnexpectedIrqCount;
-extern volatile uint16_t Core_Motor_AdcLastRaw;
-extern volatile uint16_t Core_Motor_AdcTriggerPairRawFirst;
-extern volatile uint16_t Core_Motor_AdcTriggerPairRawSecond;
+extern volatile uint32_t Core_TIM1_UpdateIrqCount;
+extern volatile uint32_t Core_TIM1_BreakIrqCount;
+extern volatile uint32_t Core_TIM1_LastBreakFlags;
+extern volatile uint32_t Core_ADC_PublishedSampleCount;
+extern volatile uint32_t Core_ADC_UnexpectedIrqCount;
+extern volatile uint16_t Core_ADC_LastRaw;
+extern volatile uint16_t Core_ADC_RegularFifoBuffer[5];
+extern volatile uint16_t Core_ADC_RegularDmaBuffer[5];
+extern volatile uint32_t Core_ADC_RegularDmaWords[5];
+extern volatile uint32_t Core_ADC_LastPublishedWords[5];
+extern volatile uint32_t Core_ADC_SequenceCompleteCount;
+extern volatile uint32_t Core_ADC_OverrunCount;
+extern volatile uint32_t Core_ADC_LastIsrFlags;
+extern volatile uint32_t Core_ADC_LastDmaIrqFlags;
+extern volatile uint32_t Core_ADC_FifoDepthAtEosLast;
+extern volatile uint32_t Core_ADC_FifoUnderflowCount;
+extern volatile uint32_t Core_ADC_FifoExtraCount;
+extern volatile uint32_t Core_ADC_ReadyTimeoutCount;
+extern volatile uint32_t Core_ADC_StopTimeoutCount;
+extern volatile uint32_t Core_ADC_StartTimeoutCount;
+extern volatile uint32_t Core_ADC_DmaTransferCompleteCount;
+extern volatile uint32_t Core_ADC_DmaTransferErrorCount;
+extern volatile uint32_t Core_ADC_DmaPublishedCount;
+extern volatile uint32_t Core_ADC_DmaRawHighBitsCount;
+extern volatile uint32_t Core_ADC_DmaMaskedOutOfRangeCount;
+extern volatile uint32_t Core_ADC_ResyncCount;
+extern volatile uint32_t Core_ADC_ResyncFailureCount;
+extern volatile uint32_t Core_ADC_DmaDroppedFirstBlockCount;
+extern volatile uint32_t Core_ADC_DmaTcSinceResync;
+extern volatile uint32_t Core_ADC_DmaBlockRearmCount;
+extern volatile uint32_t Core_ADC_DmaBlockRearmFailureCount;
+extern volatile uint32_t Core_ADC_DmaTeResyncCount;
 
 /* USART1 TX DMA 调试计数，只描述底层发送链路，不包含 VOFA 协议语义。 */
 extern volatile uint32_t Core_USART1_TxDmaStartedCount;
@@ -45,24 +72,28 @@ extern volatile uint32_t Core_USART1_BaudErrorPpm;
 void MX_GPIO_Init(void);
 void MX_DMA_Init(void);
 void MX_USART1_UART_Init(void);
+void MX_OPA_Init(void);
+void MX_DAC_Init(void);
+void MX_ACMP_Init(void);
 void MX_TIM1_Init(void);
 void MX_ADC_Init(void);
 
-bool Core_Motor_HardwareInitialize(void);
-bool Core_Motor_HardwareStart(void);
-bool Core_Motor_HardwareInitialized(void);
-bool Core_Motor_HardwareBindingEnabled(void);
-bool Core_Motor_HandleAdcIrq(void);
-void Core_Motor_HandleTim1Irq(void);
+bool Core_PeripheralsReady(void);
+bool Core_PowerBridgeBindingEnabled(void);
+bool Core_ADC_HandleConversionIrq(void);
+bool Core_ADC_HandleDmaIrq(void);
+void Core_TIM1_HandleUpdateIrq(void);
 uint16_t Core_ADC_GetLastRaw(void);
+uint16_t Core_ADC_GetPhaseURaw(void);
+uint16_t Core_ADC_GetPhaseVRaw(void);
+uint16_t Core_ADC_GetBusCurrentRaw(void);
 uint16_t Core_ADC_GetVbusRaw(void);
-uint16_t Core_ADC_GetTempRaw(uint8_t index);
-void Core_ADC_GetTriggerPairRaw(uint16_t *raw_first, uint16_t *raw_second);
+uint16_t Core_ADC_GetTemp0Raw(void);
 
 void Core_TIM1_DisablePwmOutputs(void);
+void Core_TIM1_EnablePwmOutputs(void);
+void Core_TIM1_BrakeLowOutputs(void);
 void Core_TIM1_SetPwmCompare(uint16_t phaseU, uint16_t phaseV, uint16_t phaseW);
-void Core_TIM1_SetAdcTriggerPairDuties(float first_trigger_duty,
-                                       float second_trigger_duty);
 bool Core_TIM1_PwmOutputsEnabled(void);
 uint16_t Core_TIM1_PwmPeriodCounts(void);
 uint16_t Core_TIM1_AdcTriggerCompareCounts(void);
@@ -75,13 +106,13 @@ bool Core_USART1_TxDmaBusy(void);
 bool Core_USART1_TxDmaTryStart(const uint8_t *data, uint16_t length);
 void Core_USART1_TxDmaIrqHandler(void);
 
-bool Core_Motor_TestConfigureSysTick(uint32_t frequencyHz);
-bool Core_Motor_TestStartTimerUpdate(uint32_t frequencyHz);
-bool Core_Motor_TestStartAdcSoftware(void);
-bool Core_Motor_TestTriggerAdcSoftware(void);
-bool Core_Motor_TestStartTimerAdc(void);
-void Core_Motor_TestStopTimer(void);
-void Core_ADC_EnableTriggerPairMode(bool enabled);
+bool Core_SysTick_ConfigureHz(uint32_t frequencyHz);
+bool Core_TIM1_StartUpdateInterruptHz(uint32_t frequencyHz);
+bool Core_ADC_SelectSoftwareTrigger(void);
+bool Core_ADC_StartSoftwareConversion(void);
+bool Core_TIM1_StartAdcTriggerPath(void);
+bool Core_TIM1_ResyncAdcTriggerPath(void);
+void Core_TIM1_Stop(void);
 
 #ifdef __cplusplus
 }

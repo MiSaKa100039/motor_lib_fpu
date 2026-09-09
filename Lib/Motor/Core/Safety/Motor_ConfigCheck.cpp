@@ -95,13 +95,11 @@ bool validHfiParams(const MotorObserverParam& observer)
     }
 }
 
-bool validIFStartupProfile(const MotorIFStartupProfile* profile)
+bool validIFStartupProfileImpl(const MotorIFStartupProfile* profile)
 {
-    if (profile == nullptr)
-    {
-        return true;
-    }
-    if (profile->phases == nullptr || profile->phase_count == 0U)
+    if (profile == nullptr || profile->phases == nullptr || profile->phase_count < 2U ||
+        profile->phase_count > LIB_MOTOR_IF_PROFILE_MAX_PHASES ||
+        profile->phase_count > LIB_MOTOR_DEBUG_IF_PROFILE_MAX_PHASES)
     {
         return false;
     }
@@ -111,10 +109,29 @@ bool validIFStartupProfile(const MotorIFStartupProfile* profile)
     {
         const volatile MotorIFStartupPhase& phase = profile->phases[i];
         if (!std::isfinite(phase.duration_s) ||
+            !std::isfinite(phase.hold_time_s) ||
             !std::isfinite(phase.final_speed_rpm) ||
             !std::isfinite(phase.final_id_a) ||
             !std::isfinite(phase.final_iq_a) ||
-            phase.duration_s < 0.0f)
+            phase.duration_s < 0.0f ||
+            phase.hold_time_s < 0.0f)
+        {
+            return false;
+        }
+
+        if (i == 0U)
+        {
+            if (phase.type != MotorIFStartupPhaseType::ALIGNMENT ||
+                phase.hold_time_s <= 0.0f ||
+                phase.final_speed_rpm != 0.0f ||
+                phase.final_iq_a != 0.0f)
+            {
+                return false;
+            }
+        }
+        else if (phase.type != MotorIFStartupPhaseType::RAMP ||
+                 phase.duration_s <= 0.0f ||
+                 phase.hold_time_s != 0.0f)
         {
             return false;
         }
@@ -165,10 +182,43 @@ bool validPhysicalElectricalParams(const MotorPhysicalParam& physical)
 
 }
 
+bool MotorConfigCheck::validIFStartupProfile(const MotorIFStartupProfile* profile)
+{
+    return validIFStartupProfileImpl(profile);
+}
+
+bool MotorConfigCheck::validSmoObserverParams(const MotorPhysicalParam& physical,
+                                              const MotorObserverParam& observer)
+{
+    const float rs = physical.rs_effective();
+    const float ls = physical.ls_effective();
+    return physical.pole_pairs > 0U &&
+           std::isfinite(rs) &&
+           std::isfinite(ls) &&
+           rs > 0.0f &&
+           ls > 0.0f &&
+           std::isfinite(observer.smo_gain) &&
+           std::isfinite(observer.smo_pll_kp) &&
+           std::isfinite(observer.smo_pll_ki) &&
+           std::isfinite(observer.smo_bemf_lpf_cutoff_hz) &&
+           std::isfinite(observer.smo_min_signal_level) &&
+           std::isfinite(observer.hfi_to_smo_startup_rpm) &&
+           std::isfinite(observer.hfi_to_smo_startup_hysteresis_rpm) &&
+           std::isfinite(observer.max_handover_error_rad) &&
+           observer.smo_gain > 0.0f &&
+           observer.smo_pll_kp >= 0.0f &&
+           observer.smo_pll_ki >= 0.0f &&
+           observer.smo_bemf_lpf_cutoff_hz > 0.0f &&
+           observer.smo_min_signal_level >= 0.0f &&
+           observer.hfi_to_smo_startup_rpm >= 0.0f &&
+           observer.hfi_to_smo_startup_hysteresis_rpm >= 0.0f &&
+           observer.max_handover_error_rad > 0.0f &&
+           observer.convergence_ticks > 0U;
+}
+
 Fault MotorConfigCheck::validateBuildConfig(MotorConfigFaultDetail* detail)
 {
-    if (MOTOR_BUILD_CURRENT_SENSE_MODE != 1 &&
-        MOTOR_BUILD_CURRENT_SENSE_MODE != 2 &&
+    if (MOTOR_BUILD_CURRENT_SENSE_MODE != 2 &&
         MOTOR_BUILD_CURRENT_SENSE_MODE != 3)
     {
         return configFail(detail,
@@ -181,6 +231,21 @@ Fault MotorConfigCheck::validateBuildConfig(MotorConfigFaultDetail* detail)
         return configFail(detail,
                           Fault::PARAM_ERROR,
                           MotorConfigFaultDetail::BUILD_NTC_SLOTS_INVALID);
+    }
+
+    const unsigned debug_mode_count =
+        (LIB_MOTOR_ENABLE_DEBUG_PWM_MANUAL ? 1U : 0U) +
+        (LIB_MOTOR_ENABLE_DEBUG_CURRENT_LOCK ? 1U : 0U) +
+        (LIB_MOTOR_ENABLE_DEBUG_VF_CONTROL ? 1U : 0U) +
+        (LIB_MOTOR_ENABLE_DEBUG_IF_CONTROL ? 1U : 0U) +
+        (LIB_MOTOR_ENABLE_DEBUG_IF_SMO_OBSERVER ? 1U : 0U) +
+        (LIB_MOTOR_ENABLE_DEBUG_IF_HFI_OBSERVER ? 1U : 0U) +
+        (LIB_MOTOR_ENABLE_DEBUG_HFI_OBSERVER ? 1U : 0U);
+    if (debug_mode_count > 1U)
+    {
+        return configFail(detail,
+                          Fault::PARAM_ERROR,
+                          MotorConfigFaultDetail::BUILD_DEBUG_MODE_CONFLICT);
     }
 
 #if defined(MOTOR_BUILD_ENABLE_TICK_PROFILING) && \
@@ -255,6 +320,14 @@ Fault MotorConfigCheck::validateBase(const MotorConfig& cfg,
     {
         return configFail(detail, Fault::PARAM_ERROR, MotorConfigFaultDetail::HAL_NULL);
     }
+#if LIB_MOTOR_NUMERIC_BACKEND_FIXED_Q15
+    if (cfg.hal->set_duty_q15 == nullptr)
+    {
+        return configFail(detail,
+                          Fault::PARAM_ERROR,
+                          MotorConfigFaultDetail::HAL_PWM_Q15_MISSING);
+    }
+#endif
     if (cfg.physical.pole_pairs == 0U)
     {
         return configFail(detail, Fault::PARAM_ERROR, MotorConfigFaultDetail::POLE_PAIRS_INVALID);
@@ -267,9 +340,12 @@ Fault MotorConfigCheck::validateBase(const MotorConfig& cfg,
     {
         return configFail(detail, Fault::PARAM_ERROR, MotorConfigFaultDetail::CONTROL_FREQ_INVALID);
     }
+    if (cfg.control.command_direction != 1 && cfg.control.command_direction != -1)
+    {
+        return configFail(detail, Fault::PARAM_ERROR, MotorConfigFaultDetail::CONTROL_DIRECTION_INVALID);
+    }
 
-    if (cfg.sensor.current_sense_mode != CurrentSenseMode::SINGLE_SHUNT &&
-        cfg.sensor.current_sense_mode != CurrentSenseMode::DUAL_SENSOR &&
+    if (cfg.sensor.current_sense_mode != CurrentSenseMode::DUAL_SENSOR &&
         cfg.sensor.current_sense_mode != CurrentSenseMode::TRIPLE_SENSOR)
     {
         return configFail(detail, Fault::PARAM_ERROR, MotorConfigFaultDetail::CURRENT_SENSE_MODE_INVALID);
@@ -286,14 +362,6 @@ Fault MotorConfigCheck::validateBase(const MotorConfig& cfg,
         cfg.sensor.adc_resolution <= 0.0f)
     {
         return configFail(detail, Fault::PARAM_ERROR, MotorConfigFaultDetail::CURRENT_SENSOR_CONFIG_INVALID);
-    }
-
-    if (cfg.sensor.current_sense_mode == CurrentSenseMode::SINGLE_SHUNT &&
-        cfg.sensor.current_sensor_type != CurrentSensorType::SHUNT_RESISTOR)
-    {
-        return configFail(detail,
-                          Fault::PARAM_ERROR,
-                          MotorConfigFaultDetail::SINGLE_SHUNT_REQUIRES_SHUNT_SENSOR);
     }
 
     if (cfg.sensor.current_sensor_type == CurrentSensorType::SHUNT_RESISTOR)
@@ -350,38 +418,6 @@ Fault MotorConfigCheck::validateBase(const MotorConfig& cfg,
         phase_mask == (MOTOR_PHASE_CURRENT_U_VALID | MOTOR_PHASE_CURRENT_V_VALID) ||
         phase_mask == (MOTOR_PHASE_CURRENT_U_VALID | MOTOR_PHASE_CURRENT_W_VALID) ||
         phase_mask == (MOTOR_PHASE_CURRENT_V_VALID | MOTOR_PHASE_CURRENT_W_VALID);
-
-    if (cfg.sensor.current_sense_mode == CurrentSenseMode::SINGLE_SHUNT)
-    {
-        if (phase_mask != 0U)
-        {
-            return configFail(detail,
-                              Fault::PARAM_ERROR,
-                              MotorConfigFaultDetail::PHASE_CURRENT_SINGLE_SHUNT_MASK_INVALID);
-        }
-        if (cfg.hal->read_single_shunt_pair_raw == nullptr ||
-            cfg.hal->apply_current_sample_schedule == nullptr)
-        {
-            return configFail(detail,
-                              Fault::PARAM_ERROR,
-                              MotorConfigFaultDetail::SINGLE_SHUNT_HAL_INVALID);
-        }
-        if (!std::isfinite(cfg.sensor.single_shunt_min_sample_window_s) ||
-            cfg.sensor.single_shunt_min_sample_window_s <= 0.0f ||
-            cfg.sensor.single_shunt_min_sample_window_s *
-                cfg.control.control_freq_hz >= 0.5f)
-        {
-            return configFail(detail,
-                              Fault::PARAM_ERROR,
-                              MotorConfigFaultDetail::SINGLE_SHUNT_WINDOW_INVALID);
-        }
-        if (cfg.control.modulation != ModulationMethod::SVPWM)
-        {
-            return configFail(detail,
-                              Fault::PARAM_ERROR,
-                              MotorConfigFaultDetail::SINGLE_SHUNT_REQUIRES_SVPWM);
-        }
-    }
 
     if (cfg.sensor.current_sense_mode == CurrentSenseMode::DUAL_SENSOR && !dual_mask_valid)
     {
@@ -625,23 +661,9 @@ Fault MotorConfigCheck::validateStartupTargetMode(const MotorConfig& cfg,
         case Mode::DEBUG_IF_DRAG:
         case Mode::DEBUG_IF_SMO_OBSERVER:
         case Mode::DEBUG_IF_HFI_OBSERVER:
-            if (!MotorFeatureRegistry::supportsDangerousTestApi())
-            {
-                return configFail(detail,
-                                  Fault::PARAM_ERROR,
-                                  MotorConfigFaultDetail::STARTUP_DEBUG_API_DISABLED);
-            }
-            if (mode == Mode::DEBUG_IF_DRAG ||
-                mode == Mode::DEBUG_IF_SMO_OBSERVER ||
-                mode == Mode::DEBUG_IF_HFI_OBSERVER)
-            {
-                return configFail(detail,
-                                  Fault::PARAM_ERROR,
-                                  MotorConfigFaultDetail::STARTUP_IF_DEBUG_DISABLED);
-            }
             return configFail(detail,
                               Fault::PARAM_ERROR,
-                              MotorConfigFaultDetail::STARTUP_MODE_INVALID);
+                              MotorConfigFaultDetail::STARTUP_DEBUG_API_DISABLED);
 
         case Mode::POSITION_CONTROL:
             return configFail(detail,
@@ -662,17 +684,19 @@ Fault MotorConfigCheck::validateStartupTargetMode(const MotorConfig& cfg,
         case Mode::DEBUG_CURRENT_LOCK:
         case Mode::DEBUG_VF_DRAG:
         case Mode::DEBUG_IF_DRAG:
+            return configPass(detail);
+
         case Mode::DEBUG_IF_SMO_OBSERVER:
+            if (!validSmoObserverParams(cfg.physical, cfg.observer))
+            {
+                return configFail(detail,
+                                  Fault::PARAM_ERROR,
+                                  MotorConfigFaultDetail::FEEDBACK_SMO_PARAM_INVALID);
+            }
             return configPass(detail);
 
         case Mode::DEBUG_HFI_OBSERVER:
         case Mode::DEBUG_IF_HFI_OBSERVER:
-            if (cfg.sensor.current_sense_mode == CurrentSenseMode::SINGLE_SHUNT)
-            {
-                return configFail(detail,
-                                  Fault::OBSERVER_UNAVAILABLE,
-                                  MotorConfigFaultDetail::FEEDBACK_SINGLE_SHUNT_HFI_UNSUPPORTED);
-            }
             return configPass(detail);
 
         case Mode::CALIB_RL_IDENTIFY:
@@ -923,13 +947,6 @@ Fault MotorConfigCheck::validateFeedback(const MotorHardwareConfig& hardware,
     const bool uses_hfi =
         policy.startup_source == StartupSource::HFI ||
         policy.steady_source == SteadyAngleSource::HFI;
-    if (hardware.sensor.current_sense_mode == CurrentSenseMode::SINGLE_SHUNT &&
-        uses_hfi)
-    {
-        return configFail(detail,
-                          Fault::OBSERVER_UNAVAILABLE,
-                          MotorConfigFaultDetail::FEEDBACK_SINGLE_SHUNT_HFI_UNSUPPORTED);
-    }
     if (uses_hfi && !validHfiParams(algorithm.observer))
     {
         return configFail(detail,
@@ -982,12 +999,9 @@ Fault MotorConfigCheck::validateFeedback(const MotorHardwareConfig& hardware,
                                   Fault::OBSERVER_UNAVAILABLE,
                                   MotorConfigFaultDetail::FEEDBACK_SMO_CLOSED_LOOP_DISABLED);
             }
-            if (algorithm.observer.hfi_to_smo_startup_hysteresis_rpm < 0.0f ||
-                algorithm.observer.hfi_to_smo_startup_rpm <= algorithm.observer.hfi_to_smo_startup_hysteresis_rpm ||
-                !std::isfinite(algorithm.observer.smo_min_signal_level) ||
-                algorithm.observer.smo_min_signal_level < 0.0f ||
-                algorithm.observer.max_handover_error_rad <= 0.0f ||
-                algorithm.observer.convergence_ticks == 0U)
+            if (!validSmoObserverParams(hardware.physical, algorithm.observer) ||
+                algorithm.observer.hfi_to_smo_startup_rpm <=
+                    algorithm.observer.hfi_to_smo_startup_hysteresis_rpm)
             {
                 return configFail(detail,
                                   Fault::PARAM_ERROR,
@@ -997,10 +1011,8 @@ Fault MotorConfigCheck::validateFeedback(const MotorHardwareConfig& hardware,
 switch (policy.startup_source)
             {
                 case StartupSource::IF:
-                    if (algorithm.observer.align_time_s < 0.0f ||
-                        algorithm.observer.drag_current_a <= 0.0f ||
-                        algorithm.observer.drag_accel_rpm_s <= 0.0f ||
-                        algorithm.observer.force_drag_timeout_s <= 0.0f ||
+                    if (!std::isfinite(policy.startup_restart_interval_s) ||
+                        policy.startup_restart_interval_s < 0.0f ||
                         !validIFStartupProfile(algorithm.observer.if_startup_profile))
                     {
                         return configFail(detail,

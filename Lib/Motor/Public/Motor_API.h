@@ -94,9 +94,6 @@ public:
     Result selectMode(Mode mode);
 
     /* ==================== 运行时参数 ==================== */
-#if LIB_MOTOR_ENABLE_IF_STARTUP
-    Result setDragCurrent(float A);
-#endif
     Result setControlMethod(ControlMethod method);
     Result setModulation(ModulationMethod mod);
     Result setPIDGains(PidGroup group, float kp, float ki, float kd);
@@ -111,6 +108,9 @@ public:
     /* ==================== 监视 ==================== */
     void getMonitorData(MotorMonitorData& out_data) const;
     void getDebugData(MotorDebugData& out_data) const;
+    uint8_t getTelemetryFloats(const MotorTelemetryChannel* channels,
+                               uint8_t channel_count,
+                               float* out_values) const;
 
     State getState() const;
     Fault getFault() const;
@@ -127,16 +127,16 @@ public:
     /* 堵转自动重试计数器 (已经历第几次重试) */
     uint8_t getStallRetryCounter() const;
 
-    /* SMO 收敛后辨识的 Ke (V/(rad/s)), 未辨识过 0; 也可由 physical.ke_v_per_rad_s_identified 直接读 */
+    /* 当前返回 physical.ke_v_per_rad_s_identified; 现有 SMO 不会自动写入有效 Ke。 */
     float getKEstimated() const;
 
     /* [P2] RL 辨识是否完成 (event_.rl_identify_done == 1) */
     bool isRLIdentifyDone() const;
-    /* [P2] Ke 辨识 (startKEstimation 触发的 API 流程) 是否完成 */
+    /* [P2] Ke 辨识是否完成; 当前实现未接入有效 Ke 写入源。 */
     bool isKEstimationDone() const;
     /* [P2] 顺逆风启动是否完成 (event_.flying_start_done == 1) */
     bool isFlyingStartDone() const;
-    /* [P2] 触发 Ke 辨识: 让电机在 RUN+SMO_ONLY 下采样 200ms 滑窗写 ke_v_per_rad_s_identified */
+    /* [P2] 触发 Ke 辨识预留入口; 当前 SMO getEstimatedKe() 保持 0。 */
     Result startKEstimation();
     /* [P2] 触发顺逆风启动: 若 |ω|>threshold 则尝试 PHASE_VOLTAGE 相电压 PLL 重构, 失败 fallback 到 ALIGNMENT */
     Result triggerFlyingStartIfSpinning();
@@ -155,23 +155,26 @@ public:
     void lockDebug();
     void unlockDebug();
 
-#ifdef ENABLE_DANGEROUS_TEST_API
     /* ==================== 调试专用 ==================== */
+#if LIB_MOTOR_ENABLE_DEBUG_PWM_MANUAL
     Result debugPWMManual(float u, float v, float w);
+#endif
+#if LIB_MOTOR_ENABLE_DEBUG_CURRENT_LOCK
     Result debugCurrentLock(float i_d, float i_q);
-#if LIB_MOTOR_ENABLE_IF_STARTUP
-    Result debugIFControl(float target_rpm, float id_amp, float iq_amp, float ramp_time_s);
+#endif
+#if LIB_MOTOR_ENABLE_DEBUG_IF_CONTROL
     Result debugIFControl(const MotorIFStartupProfile& profile);
-#if LIB_MOTOR_ENABLE_SMO
+#endif
+#if LIB_MOTOR_ENABLE_DEBUG_IF_SMO_OBSERVER
     Result debugIFSMOObserver(const MotorIFStartupProfile& profile);
 #endif
-#if LIB_MOTOR_ENABLE_HFI
+#if LIB_MOTOR_ENABLE_DEBUG_IF_HFI_OBSERVER
     Result debugIFHFIObserver(const MotorIFStartupProfile& profile);
 #endif
-#endif
-#if LIB_MOTOR_ENABLE_HFI
+#if LIB_MOTOR_ENABLE_DEBUG_HFI_OBSERVER
     Result debugHFIObserver();
 #endif
+#if LIB_MOTOR_ENABLE_DEBUG_VF_CONTROL
     Result debugVFControl(float duty, float speed_rpm, float ramp_time_s);
     Result debugVFControl(const MotorVFStartupProfile& profile);
 #endif
@@ -190,3 +193,4 @@ private:
 
 extern "C" bool Motor_Global_Process_Handler_TickAccepted(int motor_id);
 extern "C" void Motor_Global_Process_Handler(int motor_id);
+extern "C" void Motor_Global_ServiceSlow(int motor_id);

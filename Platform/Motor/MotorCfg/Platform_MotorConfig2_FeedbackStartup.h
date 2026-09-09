@@ -8,12 +8,14 @@
 namespace Platform_MotorConfig
 {
 
+/* ===================== [13] IF 启动 profile ===================== */
+/* 唯一启动曲线：正式 IF、Debug IF、Debug IF+观测器均引用此 profile。 */
 static volatile Lib_Motor::MotorIFStartupPhase Platform_NormalIFStartupPhases[] = {
-    {0.50f,   0.0f, 0.80f, 0.00f},
-    {1.00f,  80.0f, 0.20f, 0.40f},
-    {2.00f, 200.0f, 0.00f, 0.70f},
-    {2.00f, 400.0f, 0.00f, 1.00f},
-    {1.50f, 600.0f, 0.00f, 1.20f},
+    Lib_Motor::MotorIFStartupPhase::Alignment(0.20f, 0.80f, 1.00f),
+    Lib_Motor::MotorIFStartupPhase::Ramp(1.00f,  80.0f, 0.20f, 0.40f),
+    Lib_Motor::MotorIFStartupPhase::Ramp(2.00f, 200.0f, 0.00f, 0.70f),
+    Lib_Motor::MotorIFStartupPhase::Ramp(2.00f, 400.0f, 0.00f, 1.00f),
+    Lib_Motor::MotorIFStartupPhase::Ramp(1.50f, 600.0f, 0.00f, 1.20f),
 };
 
 static Lib_Motor::MotorIFStartupProfile Platform_NormalIFStartupProfile = {
@@ -84,6 +86,9 @@ inline void ApplyFeedbackAndStartupConfig(Lib_Motor::MotorConfig& cfg)
     */
     cfg.default_run_policy.startup_source = Lib_Motor::StartupSource::IF;
     cfg.default_run_policy.steady_source = Lib_Motor::SteadyAngleSource::SMO;
+    cfg.default_run_policy.startup_auto_restart = false;
+    cfg.default_run_policy.startup_max_retry_count = 3U;
+    cfg.default_run_policy.startup_restart_interval_s = 1.0f;
     cfg.observer.sensor_fault_action = Lib_Motor::SensorFaultAction::STOP;
 
     /* ===================== [12] 顺逆风启动与静止保证 ===================== */
@@ -120,19 +125,8 @@ inline void ApplyFeedbackAndStartupConfig(Lib_Motor::MotorConfig& cfg)
      */
     cfg.observer.flying_start_speed_threshold_rpm = 100.0f;
 
-    /* ===================== [13] IF 启动参数 ===================== */
-    /*
-     * align_current_a:     对齐电流 (A), 初始定位阶段的 d 轴电流
-     * align_time_s:        对齐时间 (s), 转子磁链对齐到 d 轴的持续时间
-     * drag_current_a:      拖动电流 (A), IF 开环阶段的电流幅值
-     * drag_accel_rpm_s:    拖动加速度 (RPM/s), IF 开环阶段的加速斜率
-     * force_drag_timeout_s: 强制拖动超时 (s), 超时未切换则报故障
-     */
-    cfg.observer.align_current_a = 1.0f;
-    cfg.observer.align_time_s = 0.5f;
-    cfg.observer.drag_current_a = 1.5f;
-    cfg.observer.drag_accel_rpm_s = 1000.0f;
-    cfg.observer.force_drag_timeout_s = 3.0f;
+    /* ===================== [13] IF 启动参数 ======================== */
+    /* 首段负责 Id 对齐，后续段负责开环转速与 dq 电流连续爬升。 */
     cfg.observer.if_startup_profile = &Platform_NormalIFStartupProfile;
 
     /* ===================== [14] HFI / 低速无感参数 ===================== */
@@ -184,6 +178,7 @@ inline void ApplyFeedbackAndStartupConfig(Lib_Motor::MotorConfig& cfg)
      * smo_gain:               滑模增益, 影响观测器收敛速度和抖振
      * smo_pll_kp:                 PLL 锁相环比例增益, 跟踪反电势角度
      * smo_pll_ki:                 PLL 锁相环积分增益
+     * smo_bemf_lpf_cutoff_hz:     滑模注入量提取反电势的一阶低通截止频率
      * smo_min_signal_level:       SMO 有效所需最小反电势信号, 0 表示关闭
      * switch_speed_rpm:       无感/有感切换速度 (RPM), 高于此值切换到 SMO
      * hysteresis_rpm:         切换滞环 (RPM), 防止在切换点反复跳变
@@ -195,12 +190,14 @@ inline void ApplyFeedbackAndStartupConfig(Lib_Motor::MotorConfig& cfg)
      * enable_auto_swap:       关闭时维持 valid=false 即 Fault 老语义；打开后先尝试预防性降级。
      */
     cfg.observer.smo_gain = 8.0f;
-    cfg.observer.smo_pll_kp = 80.0f;
+    cfg.observer.smo_pll_kp = 60.0f;
     cfg.observer.smo_pll_ki = 1200.0f;
+    cfg.observer.smo_bemf_lpf_cutoff_hz = 300.0f; // 400 rpm IF 对照试验，原值 1000 Hz。
     cfg.observer.smo_min_signal_level = 0.0f;
     /* [P4] 启动期 IF→SMO 单向加速切换 (旧 switch_speed_rpm/hysteresis_rpm)
      * 仅 handleForceDrag 消费; 稳态加速交接阈值使用 HFI 段的 hfi_to_smo_rpm。 */
-    cfg.observer.hfi_to_smo_startup_rpm            = 500.0f;
+    // 此值也用于 SMO 有效速度门槛，临时降至 300 rpm 以观察 400 rpm 收敛计数。
+    cfg.observer.hfi_to_smo_startup_rpm            = 300.0f;
     cfg.observer.hfi_to_smo_startup_hysteresis_rpm = 50.0f;
     cfg.observer.max_handover_error_rad = 0.35f;
     cfg.observer.convergence_ticks = 100;

@@ -2,10 +2,13 @@
 
 #include "../../Manager/Motor_Manager.h"
 #include "../../RunPlan/Motor_RunPlan.h"
+#if LIB_MOTOR_NUMERIC_BACKEND_FIXED_Q15
+#include "../../Numeric/Motor_FixedNumeric.h"
+#endif
 
 #include <cmath>
 
-#if LIB_MOTOR_ENABLE_SMO
+#if LIB_MOTOR_ENABLE_SMO && !LIB_MOTOR_NUMERIC_BACKEND_FIXED_Q15
 namespace
 {
 constexpr float kPi = 3.14159265358979323846f;
@@ -25,7 +28,20 @@ namespace Lib_Motor
 
 RunPhase Motor_RunPhaseFSM::selectInitialPhase(MotorManager& m, bool direct_run)
 {
-    return MotorRunPlan::selectInitialPhase(m.active_policy_, direct_run);
+    const RunPhase initial = MotorRunPlan::selectInitialPhase(m.active_policy_, direct_run);
+#if LIB_MOTOR_ENABLE_FLYING_START
+    if (!direct_run &&
+        initial == RunPhase::FORCE_DRAG &&
+        m.config_.observer.flying_start_mode == FlyingStartMode::PHASE_VOLTAGE &&
+        m.config_.sensor.has_phase_voltage &&
+        fabsf(runtimeSpeedToPhysical(m.ctx_, m.ctx_.speed_rpm)) >
+            m.config_.observer.flying_start_speed_threshold_rpm)
+    {
+        m.flying_start_routine_.reset();
+        return RunPhase::FLYING_START;
+    }
+#endif
+    return initial;
 }
 
 void Motor_RunPhaseFSM::step(MotorManager& m)
@@ -66,61 +82,67 @@ void Motor_RunPhaseFSM::step(MotorManager& m)
 
 void Motor_RunPhaseFSM::handleAlignment(MotorManager& m)
 {
-    /* [P2] start() 时自动检测顺逆风: 若 cfg.observer.flying_start_mode==PHASE_VOLTAGE
-     * 且启动初始 |ω| 已超过顺逆风启动阈值 → 切到 FLYING_START 走相电压 PLL 重构, 而非 ALIGNMENT 电流拉转子。
-     * 否则 (cfg未打开 / ω 低于阈值 / 无相电压采样) → 走标准 ALIGNMENT 流程。
-     */
-#if LIB_MOTOR_ENABLE_FLYING_START
-    if (m.config_.observer.flying_start_mode == FlyingStartMode::PHASE_VOLTAGE &&
-        m.config_.sensor.has_phase_voltage &&
-        m.ctx_.fsm_timer_ticks == 1U)   // 仅第一 tick 检测
-    {
-        const float speed_abs = fabsf(m.getSpeed());
-        // [P3.B] 顺逆风启动阈值 cfg.observer.flying_start_speed_threshold_rpm, 默认 100 RPM
-        if (speed_abs > m.config_.observer.flying_start_speed_threshold_rpm)
-        {
-            m.flying_start_routine_.reset();
-            m.flying_start_routine_.step(m);    // 立即进入 WAIT_BEMF 一次
-            m.setRunPhase(RunPhase::FLYING_START);
-            return;
-        }
-    }
-#endif
-
-#if LIB_MOTOR_ENABLE_IF_STARTUP
-    const uint32_t align_ticks =
-        static_cast<uint32_t>(m.config_.observer.align_time_s *
-                              m.config_.control.control_freq_hz);
-
-    if (m.ctx_.fsm_timer_ticks <= align_ticks)
+    /* IF 对齐已经并入 FORCE_DRAG profile；该阶段仅保留给辨识流程。 */
+#if LIB_MOTOR_ENABLE_AUTO_IDENTIFY
+    if (m.targetMode() == Mode::CALIB_RL_IDENTIFY)
     {
         return;
     }
-
-    m.if_angle_gen_.reset();
-    m.setRunPhase(RunPhase::FORCE_DRAG);
-    m.ctx_.fsm_timer_ticks = 0U;
-#else
-    m.stopForFault(Fault::OBSERVER_UNAVAILABLE);
 #endif
+    m.stopForFault(Fault::OBSERVER_UNAVAILABLE);
 }
 
 void Motor_RunPhaseFSM::handleForceDrag(MotorManager& m)
 {
 #if LIB_MOTOR_ENABLE_IF_STARTUP
+#if LIB_MOTOR_NUMERIC_BACKEND_FIXED_Q15
+#if LIB_MOTOR_ENABLE_SMO
+    const FixedNumeric::q15_t speed_abs =
+        FixedNumeric::absoluteQ15(m.ctx_.smo_estimate.speed_rpm_q15);
+    const RuntimeAngle smo_handover_angle =
+        m.correctSmoAngleForControl(m.ctx_.smo_estimate.angle_phase,
+                                    m.ctx_.smo_estimate.speed_rpm_q15);
+    const int32_t phase_error_signed =
+        static_cast<int32_t>(smo_handover_angle - m.ctx_.angle_elec);
+    const uint32_t phase_error_abs = (phase_error_signed < 0)
+        ? static_cast<uint32_t>(-static_cast<int64_t>(phase_error_signed))
+        : static_cast<uint32_t>(phase_error_signed);
+    const uint32_t max_phase_error =
+        FixedNumeric::phaseFromRadians(m.config_.observer.max_handover_error_rad);
+
+    if (speed_abs > m.ctx_.if_switch_up_speed_q15 &&
+        m.event_.observer_converged &&
+        phase_error_abs <= max_phase_error)
+    {
+        m.clearStartupRestartState();
+        m.setRunPhase(RunPhase::SMO_ONLY);
+        m.ctx_.fsm_timer_ticks = 0U;
+        return;
+    }
+#endif
+
+    if (m.ifStartupProfileComplete())
+    {
+        m.handleIFStartupFailure();
+    }
+#else
     const auto& obs_cfg = m.config_.observer;
-    const float speed_abs = fabsf(m.getSpeed());
+    const float speed_abs =
+        fabsf(runtimeSpeedToPhysical(m.ctx_, m.ctx_.speed_rpm_observer));
     // [P4] 启动期 IF→SMO 单向加速切换用 hfi_to_smo_startup_rpm (旧 switch_speed_rpm)
     const float switch_up = obs_cfg.hfi_to_smo_startup_rpm + obs_cfg.hfi_to_smo_startup_hysteresis_rpm;
 
 #if LIB_MOTOR_ENABLE_SMO
+    const RuntimeAngle smo_handover_angle =
+        m.correctSmoAngleForControl(m.ctx_.smo_estimate.angle_rad,
+                                    m.ctx_.speed_rpm_observer);
     const float handover_error =
-        fabsf(wrapSignedAngleLocal(m.ctx_.smo_estimate.angle_rad -
-                                   m.ctx_.angle_elec));
+        fabsf(wrapSignedAngleLocal(smo_handover_angle - m.ctx_.angle_elec));
     if (speed_abs > switch_up &&
         m.event_.observer_converged &&
         handover_error <= obs_cfg.max_handover_error_rad)
     {
+        m.clearStartupRestartState();
         m.setRunPhase(RunPhase::SMO_ONLY);
         m.ctx_.fsm_timer_ticks = 0U;
         return;
@@ -133,13 +155,11 @@ void Motor_RunPhaseFSM::handleForceDrag(MotorManager& m)
     }
 #endif
 
-    const uint32_t timeout_ticks =
-        static_cast<uint32_t>(obs_cfg.force_drag_timeout_s *
-                              m.config_.control.control_freq_hz);
-    if (timeout_ticks > 0U && m.ctx_.fsm_timer_ticks > timeout_ticks)
+    if (m.ifStartupProfileComplete())
     {
-        m.stopForFault(Fault::OBSERVER_LOSS);
+        m.handleIFStartupFailure();
     }
+#endif
 #else
     m.stopForFault(Fault::OBSERVER_UNAVAILABLE);
 #endif
@@ -160,7 +180,7 @@ void Motor_RunPhaseFSM::handleSmo(MotorManager& m)
      * - enable_auto_swap=false: 维持旧的"立即 OBSERVER_LOSS"行为, 向后兼容。
      */
     const auto& obs = m.config_.observer;
-    const float speed_abs = fabsf(m.getSpeed());
+    const float speed_abs = fabsf(runtimeSpeedToPhysical(m.ctx_, m.ctx_.speed_rpm));
     const uint32_t grace_ticks =
         static_cast<uint32_t>(obs.switch_grace_time_s *
                               m.config_.control.control_freq_hz);
@@ -181,6 +201,8 @@ void Motor_RunPhaseFSM::handleSmo(MotorManager& m)
             m.ctx_.fsm_timer_ticks = 0U;
             return;
 #elif LIB_MOTOR_ENABLE_IF_STARTUP
+            m.resetIFStartupProfileState();
+            m.resetIFStartupObserverState();
             m.if_angle_gen_.reset();
             m.setRunPhase(RunPhase::FORCE_DRAG);
             m.ctx_.fsm_timer_ticks = 0U;
@@ -211,7 +233,7 @@ void Motor_RunPhaseFSM::handleHfi(MotorManager& m)
      * 减速段: HFI 已稳定时不切回 SMO; HFI 失效且无 SMO 兜底则 Fault。
      */
     const auto& obs = m.config_.observer;
-    const float speed_abs = fabsf(m.getSpeed());
+    const float speed_abs = fabsf(runtimeSpeedToPhysical(m.ctx_, m.ctx_.speed_rpm));
 
     if (obs.enable_auto_swap && speed_abs > obs.hfi_to_smo_rpm + obs.switch_hysteresis_rpm)
     {

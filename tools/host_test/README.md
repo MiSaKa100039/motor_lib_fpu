@@ -66,7 +66,7 @@ tools/host_test/
 | 文件 | 测试关注点 | BuildCfg 闸控 |
 |---|---|---|
 | `Lib/Motor/Core/FSM/StreamFSM/Motor_StreamFSM.cpp` | ACTIVE→HELD 超时 + fault/stop 冻结 | HOLD 开启时才编 |
-| `Lib/Motor/Core/Runtime/Motor_ManagerRuntime.cpp` 位置环分支 | pos_err → iq_ref 方向校正 + vel_ff 叠加 | POSITION + VEL_FF 开启时才编 |
+| `Lib/Motor/Core/Runtime/Motor_Runtime.cpp` 位置环分支 | pos_err → iq_ref 方向校正 + vel_ff 叠加 | POSITION + VEL_FF 开启时才编 |
 | `Lib/Motor/Core/Safety/Motor_CommandGuard.cpp` POSITION 入口 | HIGH_RES_ENCODER 通过 / HALL 拒绝 | POSITION 或 IMPEDANCE 开启时才编 |
 | `Lib/Motor/Core/Manager/Motor_ManagerAPI.cpp` writeSetpoint | 各 mode 字段落地正确性 | — |
 | `Lib/Motor/Core/Feature/Motor_FeatureRegistry.cpp` IMPEDANCE | BuildCfg 开关与 supportsMode 一致性 | IMPEDANCE 开启时才编 |

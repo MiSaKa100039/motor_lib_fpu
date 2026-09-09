@@ -7,6 +7,8 @@ namespace Lib_Motor
 
 // PWM control: inputs are normalized duties in [0.0, 1.0].
 using Motor_HAL_SetPWMCallback = void (*)(float u, float v, float w);
+// Fixed-Q15 PWM control: inputs are unsigned Q15 duties in [0, 32767].
+using Motor_HAL_SetPWMQ15Callback = void (*)(int16_t u, int16_t v, int16_t w);
 
 // BSP declares which physical phase-current channels are really populated.
 // read_currents_raw() must always return physical U/V/W in fixed positions.
@@ -16,23 +18,9 @@ constexpr uint8_t MOTOR_PHASE_CURRENT_W_VALID = (1U << 2);
 constexpr uint8_t MOTOR_PHASE_CURRENT_ALL_VALID =
     MOTOR_PHASE_CURRENT_U_VALID | MOTOR_PHASE_CURRENT_V_VALID | MOTOR_PHASE_CURRENT_W_VALID;
 
-constexpr uint8_t MOTOR_CURRENT_SAMPLE_SCHEDULE_MAX_POINTS = 2U;
-
-// Hardware-only ADC trigger schedule. Phase/sign reconstruction stays inside Sampling.
-struct MotorCurrentSampleSchedule
-{
-    uint8_t enabled = 0U;
-    uint8_t sample_count = 0U;
-    float trigger_duty[MOTOR_CURRENT_SAMPLE_SCHEDULE_MAX_POINTS] = {0.5f, 0.5f};
-};
-
 // Current ADC samples. The bus-current value is optional and ignored when has_bus_current=false.
 using Motor_HAL_ReadCurrentCallback =
     void (*)(uint16_t* raw_u, uint16_t* raw_v, uint16_t* raw_w, uint16_t* raw_bus);
-using Motor_HAL_ReadSingleShuntPairCallback =
-    bool (*)(uint16_t* raw_first, uint16_t* raw_second);
-using Motor_HAL_ApplyCurrentSampleScheduleCallback =
-    void (*)(const MotorCurrentSampleSchedule* schedule);
 
 // Voltage/temperature ADC samples.
 using Motor_HAL_ReadVbusCallback = uint16_t (*)(void);
@@ -42,6 +30,17 @@ using Motor_HAL_ReadTempCallback = uint16_t (*)(uint8_t index);
 
 using Motor_HAL_VoidCallback = void (*)(void);
 using Motor_HAL_SetBrakeChopperDutyCallback = void (*)(float duty);
+
+constexpr uint32_t MOTOR_HAL_HW_FAULT_NONE = 0UL;
+constexpr uint32_t MOTOR_HAL_HW_FAULT_TIM1_BREAK = (1UL << 0);
+constexpr uint32_t MOTOR_HAL_HW_FAULT_TIM1_BREAK2 = (1UL << 1);
+constexpr uint32_t MOTOR_HAL_HW_FAULT_COMPARATOR = (1UL << 2);
+constexpr uint32_t MOTOR_HAL_HW_FAULT_GATE_DRIVER = (1UL << 3);
+constexpr uint32_t MOTOR_HAL_HW_FAULT_UNKNOWN = (1UL << 31);
+constexpr uint32_t MOTOR_HAL_HW_FAULT_ALL = 0xFFFFFFFFUL;
+
+using Motor_HAL_ReadHardwareFaultFlagsCallback = uint32_t (*)(void);
+using Motor_HAL_ClearHardwareFaultFlagsCallback = void (*)(uint32_t flags);
 
 /* [本轮新增] Flash 持久化接口 (本轮仅 HAL 接口预占位, 库不调用)
  * 由项目侧 BSP 实现 boot/flash_read/write/erase; nullptr 表示无 flash 持久化能力,
@@ -89,8 +88,11 @@ struct MotorHAL_t
     Motor_HAL_FlashEraseCallback flash_erase      = nullptr;
     uint32_t                     flash_sector_size = 0;
 
-    Motor_HAL_ReadSingleShuntPairCallback read_single_shunt_pair_raw = nullptr;
-    Motor_HAL_ApplyCurrentSampleScheduleCallback apply_current_sample_schedule = nullptr;
+    Motor_HAL_ReadHardwareFaultFlagsCallback read_hardware_fault_flags = nullptr;
+    Motor_HAL_ClearHardwareFaultFlagsCallback clear_hardware_fault_flags = nullptr;
+
+    /* fixed-q15 快路径输出。启用 fixed 后端时 ConfigCheck 要求 BSP 必须提供。 */
+    Motor_HAL_SetPWMQ15Callback set_duty_q15 = nullptr;
 };
 
 } // namespace Lib_Motor

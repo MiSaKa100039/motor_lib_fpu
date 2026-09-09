@@ -61,7 +61,7 @@ struct MotorPhysicalParam
     MotorPhysicalParamSource electrical_param_source = MotorPhysicalParamSource::AUTO;
 
     /* === 运行期辨识值 (RAM, 冷启动丢失) ===
-     * *_identified 由库内 RL 辨识或 SMO/Ke 辨识流程写入, 平台 cfg 不手填。
+     * *_identified 由库内 RL 辨识或后续显式 Ke 辨识流程写入, 平台 cfg 不手填。
      * 默认 0 = 未辨识; 若未接入 flash 持久化, 需要人工把确认值回填到 *_learned_cfg 或 *_measured。
      */
     float   rs_ohm_identified            = 0.0f;
@@ -75,8 +75,8 @@ struct MotorPhysicalParam
      * MEASURED / LEARNED_CFG: 只使用指定来源, 避免调试时来源混淆。
      * Ld/Lq 只作为手动测量补充项参与电流环推导, 自动 RL 辨识仍只写标量 Ls;
      * 若只填 Ld/Lq 而 Ls=0, ls_effective() 使用较小有效值作为保守单标量;
-     * Ke 仅 SMO 收敛 + 高速稳态时由 SMO 持续更新 identified;
-     * 非 SMO 应用保持固化 cfg 不变, 工业做法由 VCU 温度补偿。
+     * 当前 SMO 估角与电压圆限幅不消费 Ke; Ke 字段保留给后续反电势前馈、
+     * 弱磁、速度裕量预算或显式 Ke 辨识。
      */
     float rs_effective()  const
     {
@@ -187,11 +187,12 @@ struct MotorPhysicalParam
  * ========================================================= */
 struct MotorLimitParam
 {
-    float max_current_a     = 5.0f;    // 过流阈值 (A), 超过即 OVCURRENT
-    float max_speed_rpm     = 3000.0f; // 最大转速 (RPM)
-    float max_duty_cycle    = 0.95f;   // 最大占空比限制 [0~1], 留出 ADC 采样窗口
-    float over_voltage_v    = 30.0f;   // 过压阈值 (V)
-    float under_voltage_v   = 10.0f;   // 欠压阈值 (V), 初始化采样完成后持续检查
+    float max_phase_current_a = 5.0f;    // 相线软件过流阈值 (A), 超过即 OVCURRENT
+    float max_bus_current_a   = 5.0f;    // 母线软件过流阈值 (A), has_bus_current=true 时生效
+    float max_speed_rpm       = 3000.0f; // 最大转速 (RPM)
+    float max_duty_cycle      = 0.95f;   // 最大占空比限制 [0~1], 留出 ADC 采样窗口
+    float over_voltage_v      = 30.0f;   // 过压阈值 (V)
+    float under_voltage_v     = 10.0f;   // 欠压阈值 (V), 初始化采样完成后持续检查
 };
 
 /* =========================================================
@@ -231,7 +232,6 @@ enum class CurrentSensorType : uint8_t
 
 enum class CurrentSenseMode : uint8_t
 {
-    SINGLE_SHUNT = 1,  // DC-link single-shunt sampling with two samples per PWM period
     DUAL_SENSOR   = 2,  // 双传感器: BSP 声明实测的两相, 缺失相由 KCL 计算
     TRIPLE_SENSOR = 3,  // 三传感器: 三相独立采样
 };
@@ -263,7 +263,6 @@ struct MotorSensorParam
 
     float phase_shunt_resistor = 0.001f; // 相电流采样电阻 (Ω), 分流电阻模式用
     float phase_amp_gain       = 50.0f;  // 相电流运放增益 (V/V), 分流电阻模式用
-    float single_shunt_min_sample_window_s = 1.5e-6f; // Minimum active-vector sampling window for single-shunt mode
 
     float hall_sensitivity_mV_per_A = 4.4f; // 霍尔灵敏度 (mV/A), 零点由上电 ADC offset 校准
 
@@ -314,16 +313,9 @@ struct MotorFeedbackCapabilityParam
     AngleFeedbackClass feedback_class = AngleFeedbackClass::UNSPECIFIED;
 
     /*
-     * 以下字段保留给有感 SENSOR 主链的人工声明和旧配置兼容。
-     * 核心校验按 feedback_class 推导能力, 无感 SMO/HFI 不再填写或依赖这些布尔位。
+     * 有感反馈能力由 feedback_class 统一推导。
+     * 无感 SMO/HFI 不在这里伪装成 SENSOR 主反馈。
      */
-    bool supports_torque_control   = false; // 有感反馈可提供闭环电角度
-    bool supports_speed_control    = false; // 有感反馈可提供速度或可靠边沿估算
-    bool supports_position_control = false; // 有感反馈可用于精细位置闭环
-
-    bool angle_valid_at_standstill = false; // 有感反馈静止时能否读到可用角度
-    bool speed_valid_at_standstill = false; // 有感反馈静止附近速度是否仍可信
-
     float position_resolution_mech_deg = 0.0f; // 有感机械角分辨率, 0=未知/不声明
     float min_valid_speed_rpm          = 0.0f; // 有感边沿估算最低有效速度, 0=无下限
 };
@@ -439,6 +431,7 @@ struct MotorImpedanceParam
 struct MotorControlParam
 {
     float control_freq_hz = 10000.0f;  // FOC 控制频率 (Hz), 通常 = PWM 频率
+    int8_t command_direction = 1;      // +1=API 正方向按内部方向; -1=API 正方向反向
 
     PIDParam current_d;       // D 轴电流环 PID
     PIDParam current_q;       // Q 轴电流环 PID
@@ -500,7 +493,7 @@ struct MotorControlParam
  * [6] 运动目标与闭环限幅
  *
  *     这里是控制目标的软限制, 不等同于硬故障阈值
- *       - limit.max_current_a 是过流保护
+ *       - limit.max_phase_current_a / max_bus_current_a 是软件过流保护
  *       - motion.max_iq_ref_a 是正常控制允许给电流环的 Iq 上限
  * ========================================================= */
 #if LIB_MOTOR_ENABLE_STALL_PROTECTION
@@ -663,12 +656,7 @@ struct MotorEnergyBudget
 struct MotorObserverParam
 {
     /* ==================== [A1] IF 启动参数 ==================== */
-    float align_current_a = 1.0f;   // 预对齐电流 (A)
-    float align_time_s    = 0.5f;   // 预对齐保持时间 (s)
-    float drag_current_a    = 1.5f;     // I/F 强拖电流 (A)
-    float drag_accel_rpm_s  = 1000.0f;  // IF_TO_SMO 的 FORCE_DRAG 机械转速爬升率 (RPM/s)
-    float force_drag_timeout_s = 3.0f;  // FORCE_DRAG 等待观测器接管的最长时间 (s)
-    const MotorIFStartupProfile* if_startup_profile = nullptr; // 正常 FORCE_DRAG 可选分段启动曲线。
+    const MotorIFStartupProfile* if_startup_profile = nullptr; // IF 对齐与拖动的必选分段启动曲线
 
     HfiInjectionMode hfi_injection_mode = HfiInjectionMode::SINE_CARRIER;
 
@@ -700,6 +688,7 @@ struct MotorObserverParam
     float smo_gain = 1.0f;   // 滑模增益 (越大收敛越快, 但噪声越大)
     float smo_pll_kp   = 2.0f;   // PLL 比例增益 (跟踪反电动势角度)
     float smo_pll_ki   = 50.0f;  // PLL 积分增益
+    float smo_bemf_lpf_cutoff_hz = 1000.0f; // SMO 从滑模注入量提取反电势的一阶低通截止频率 (Hz)
     float smo_min_signal_level = 0.0f; // SMO 有效所需最小反电势信号, 0 表示关闭
     float hfi_to_smo_startup_rpm            = 500.0f;  // [P4] 启动期 IF→SMO 单向加速切换速度阈值 (旧 switch_speed_rpm)
     float hfi_to_smo_startup_hysteresis_rpm = 50.0f;   // [P4] 启动期 IF→SMO 单向切换迟滞 (旧 hysteresis_rpm)
@@ -758,6 +747,9 @@ struct MotorRunPolicy
 {
     StartupSource     startup_source = StartupSource::IF;
     SteadyAngleSource steady_source  = SteadyAngleSource::SMO;
+    bool    startup_auto_restart = false;       // 启动交接失败后是否自动重试
+    uint8_t startup_max_retry_count = 0U;       // 首次启动之外允许的额外尝试次数
+    float   startup_restart_interval_s = 0.0f;  // COAST 停机后的重试等待时间
 };
 
 /* =========================================================

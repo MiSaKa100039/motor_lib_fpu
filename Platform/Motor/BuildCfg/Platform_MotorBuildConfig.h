@@ -106,7 +106,7 @@ constexpr bool supportsOutputSensor()
  */
 constexpr bool supportsBusCurrent()
 {
-#ifdef MOTOR_BUILD_HAS_BUS_CURRENT
+#if MOTOR_BUILD_HAS_BUS_CURRENT
     return true;
 #else
     return false;

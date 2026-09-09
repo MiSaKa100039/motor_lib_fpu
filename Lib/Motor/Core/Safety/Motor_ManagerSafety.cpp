@@ -12,7 +12,7 @@
 namespace Lib_Motor
 {
 
-#if LIB_MOTOR_ENABLE_STALL_PROTECTION
+#if LIB_MOTOR_ENABLE_STALL_PROTECTION || LIB_MOTOR_ENABLE_IF_STARTUP
 static uint32_t secondsToTicks(float seconds, float dt)
 {
     if (seconds <= 0.0f || dt <= 0.0f) return 0U;
@@ -22,25 +22,121 @@ static uint32_t secondsToTicks(float seconds, float dt)
 }
 #endif
 
+static MotorRuntimeFaultDetail hardwareFaultDetailFromFlags(uint32_t flags)
+{
+    if ((flags & MOTOR_HAL_HW_FAULT_TIM1_BREAK) != 0UL)
+    {
+        return MotorRuntimeFaultDetail::HARDWARE_BUS_OVERCURRENT_COMPARATOR;
+    }
+    if ((flags & MOTOR_HAL_HW_FAULT_TIM1_BREAK2) != 0UL)
+    {
+        return MotorRuntimeFaultDetail::HARDWARE_BUS_OVERCURRENT_COMPARATOR;
+    }
+    if ((flags & MOTOR_HAL_HW_FAULT_COMPARATOR) != 0UL)
+    {
+        return MotorRuntimeFaultDetail::HARDWARE_BUS_OVERCURRENT_COMPARATOR;
+    }
+    return MotorRuntimeFaultDetail::HARDWARE_FAULT_UNKNOWN;
+}
+
 void MotorManager::runSafetyCheck()
 {
-    if (state_ == State::INIT || state_ == State::ADC_CAL)
+    if (state_ == State::UNINITIALIZED ||
+        state_ == State::INIT ||
+        state_ == State::ADC_CAL ||
+        state_ == State::ERROR ||
+        state_ == State::ISR_DIAGNOSTIC)
     {
         return;
     }
 
+#if LIB_MOTOR_NUMERIC_BACKEND_FIXED_Q15
+    pollHardwareFaultLatch();
+
+    FixedNumeric::q15_t max_phase_current =
+        FixedNumeric::absoluteQ15(ctx_.i_a);
+    const FixedNumeric::q15_t abs_ib = FixedNumeric::absoluteQ15(ctx_.i_b);
+    const FixedNumeric::q15_t abs_ic = FixedNumeric::absoluteQ15(ctx_.i_c);
+    if (abs_ib > max_phase_current) max_phase_current = abs_ib;
+    if (abs_ic > max_phase_current) max_phase_current = abs_ic;
+
+    if (ctx_.phase_overcurrent_q15 > 0 &&
+        max_phase_current > ctx_.phase_overcurrent_q15)
+    {
+        setFault(Fault::OVERCURRENT,
+                 MotorRuntimeFaultDetail::SOFTWARE_PHASE_OVERCURRENT);
+    }
+
+#if MOTOR_BUILD_HAS_BUS_CURRENT
+    if (config_.sensor.has_bus_current &&
+        ctx_.bus_overcurrent_q15 > 0 &&
+        FixedNumeric::absoluteQ15(ctx_.i_bus) > ctx_.bus_overcurrent_q15)
+    {
+        setFault(Fault::OVERCURRENT,
+                 MotorRuntimeFaultDetail::SOFTWARE_BUS_OVERCURRENT);
+    }
+#endif
+
+    if (ctx_.v_bus > ctx_.vbus_overvoltage_q15)
+    {
+        setFault(Fault::OVERVOLT);
+    }
+
+    if (ctx_.vbus_undervoltage_q15 > 0 &&
+        ctx_.v_bus < ctx_.vbus_undervoltage_q15)
+    {
+        setFault(Fault::UNDERVOLT);
+    }
+
 #if MOTOR_BUILD_NTC_SLOTS > 0
+    for (uint8_t i = 0; i < MOTOR_BUILD_NTC_SLOTS; ++i)
+    {
+        if (!config_.sensor.ntc[i].enabled) continue;
+        if (ctx_.temperature_deci_c[i] > ctx_.ntc_over_temp_deci_c[i])
+        {
+            setFault(Fault::OVERTEMP);
+        }
+    }
+#endif
+
+    MotorSignalHealth::checkPositionConsistency(*this);
+#else
+#if MOTOR_BUILD_NTC_SLOTS > 0 && !LIB_MOTOR_NUMERIC_BACKEND_FIXED_Q15
     const float* temperatures = ctx_.temperature_c;
 #else
     static const float temperatures[4] = {0.0f, 0.0f, 0.0f, 0.0f};
 #endif
 
+    pollHardwareFaultLatch();
+
     runtime_monitor_.check(config_.limit, config_.sensor,
-                           ctx_.i_a, ctx_.i_b, ctx_.i_c,
-                           ctx_.v_bus, temperatures,
-                           state_, &fault_);
+                           runtimeCurrentToPhysical(ctx_, ctx_.i_a),
+                           runtimeCurrentToPhysical(ctx_, ctx_.i_b),
+                           runtimeCurrentToPhysical(ctx_, ctx_.i_c),
+#if MOTOR_BUILD_HAS_BUS_CURRENT
+                           runtimeCurrentToPhysical(ctx_, ctx_.i_bus),
+#else
+                           0.0f,
+#endif
+                           runtimeBusVoltageToPhysical(ctx_, ctx_.v_bus), temperatures,
+                           state_, &fault_,
+                           &runtime_fault_detail_);
+
+#if LIB_MOTOR_NUMERIC_BACKEND_FIXED_Q15 && MOTOR_BUILD_NTC_SLOTS > 0
+    for (uint8_t i = 0; i < MOTOR_BUILD_NTC_SLOTS; ++i)
+    {
+        if (!config_.sensor.ntc[i].enabled) continue;
+        if (ctx_.temperature_deci_c[i] > ctx_.ntc_over_temp_deci_c[i])
+        {
+            fault_ = static_cast<Fault>(
+                static_cast<uint16_t>(fault_) |
+                static_cast<uint16_t>(Fault::OVERTEMP));
+        }
+    }
+#endif
 
     MotorSignalHealth::checkPositionConsistency(*this);
+#endif
 }
 
 void MotorManager::clearStallState()
@@ -85,6 +181,10 @@ void MotorManager::prepareModeTransition(Mode previous_mode, Mode next_mode)
 {
     if (previous_mode == next_mode) return;
 
+#if LIB_MOTOR_ENABLE_IF_STARTUP
+    clearStartupRestartState();
+#endif
+
     const bool touches_debug_or_calib =
         MotorCommandGuard::isDebugOrCalib(previous_mode) ||
         MotorCommandGuard::isDebugOrCalib(next_mode);
@@ -108,12 +208,12 @@ void MotorManager::prepareModeTransition(Mode previous_mode, Mode next_mode)
 
     if (previous_mode == Mode::VELOCITY_CONTROL || next_mode == Mode::VELOCITY_CONTROL)
     {
-        controller_.pid_speed.reset();
+        controller_.resetSpeedPid();
     }
 
-    ctx_.iq_ref_limited = (state_ == State::RUN) ? ctx_.i_q : 0.0f;
-    ctx_.iq_ref_command = 0.0f;
-    ctx_.speed_pid_iq = 0.0f;
+    ctx_.iq_ref_limited = (state_ == State::RUN) ? ctx_.i_q : 0;
+    ctx_.iq_ref_command = 0;
+    ctx_.speed_pid_iq = 0;
 
     if (next_mode == Mode::VELOCITY_CONTROL)
     {
@@ -121,7 +221,7 @@ void MotorManager::prepareModeTransition(Mode previous_mode, Mode next_mode)
     }
     else
     {
-        ctx_.speed_ref_limited = 0.0f;
+        ctx_.speed_ref_limited = 0;
     }
 
 #if LIB_MOTOR_ENABLE_STALL_PROTECTION
@@ -152,6 +252,9 @@ void MotorManager::transitionToStop(StopMode mode, bool clear_user_targets, bool
         target_mode_ = config_.control.startup_target_mode;
         clearControlTargets();
         clearStallState();
+#if LIB_MOTOR_ENABLE_IF_STARTUP
+        clearStartupRestartState();
+#endif
     }
     else
     {
@@ -162,19 +265,21 @@ void MotorManager::transitionToStop(StopMode mode, bool clear_user_targets, bool
 #endif
     }
 
-    ctx_.duty_a = 0.0f;
-    ctx_.duty_b = 0.0f;
-    ctx_.duty_c = 0.0f;
-    ctx_.v_d = 0.0f;
-    ctx_.v_q = 0.0f;
-    ctx_.v_alpha = 0.0f;
-    ctx_.v_beta = 0.0f;
+    ctx_.duty_a = 0;
+    ctx_.duty_b = 0;
+    ctx_.duty_c = 0;
+    ctx_.v_d = 0;
+    ctx_.v_q = 0;
+    ctx_.v_alpha = 0;
+    ctx_.v_beta = 0;
     controller_.reset();
 #if LIB_MOTOR_ENABLE_AUTO_IDENTIFY
     if (reset_rl_identify)
     {
         rl_identify_routine_.reset();
     }
+#else
+    (void)reset_rl_identify;
 #endif
 #if LIB_MOTOR_ENABLE_HFI
     hfi_.setEnabled(false);
@@ -183,7 +288,7 @@ void MotorManager::transitionToStop(StopMode mode, bool clear_user_targets, bool
 #if LIB_MOTOR_ENABLE_IF_STARTUP
     resetIFStartupProfileState();
 #endif
-#if LIB_MOTOR_ENABLE_IF_STARTUP || LIB_MOTOR_ENABLE_DANGEROUS_TEST_API
+#if LIB_MOTOR_ENABLE_IF_STARTUP || LIB_MOTOR_ENABLE_DEBUG_VF_CONTROL || LIB_MOTOR_ENABLE_DEBUG_IF_ANY
     if_angle_gen_.reset();
 #endif
 
@@ -203,7 +308,7 @@ void MotorManager::updateStallProtection(float speed_error, float iq_ref, float 
     }
 
     const bool candidate = MotorTargetLimiter::isStallCandidate(
-        config_, ctx_.speed_rpm, speed_error, iq_ref, iq_limit);
+        config_, runtimeSpeedToPhysical(ctx_, ctx_.speed_rpm), speed_error, iq_ref, iq_limit);
     const uint32_t confirm_ticks = secondsToTicks(stall.confirm_time_s, dt_);
 
     if (candidate)
@@ -251,7 +356,7 @@ void MotorManager::updateStallProtection(float speed_error, float iq_ref, float 
     if (event_.motor_stalled != 0U)
     {
         const bool recovered =
-            fabsf(ctx_.speed_rpm) >= stall.release_speed_rpm ||
+            fabsf(runtimeSpeedToPhysical(ctx_, ctx_.speed_rpm)) >= stall.release_speed_rpm ||
             fabsf(speed_error) <= stall.speed_error_rpm;
         if (recovered)
         {
@@ -282,7 +387,7 @@ void MotorManager::updateStallProtection(float speed_error, float iq_ref, float 
         const float thaw_factor =
             0.98f + 0.02f * (1.0f - static_cast<float>(stall_thaw_remaining_ticks_) /
                                        static_cast<float>(0.2f * config_.control.control_freq_hz + 1.0f));
-        controller_.pid_speed.decayIntegral(thaw_factor);
+        controller_.decaySpeedIntegral(thaw_factor);
     }
 }
 
@@ -318,7 +423,77 @@ void MotorManager::processPendingStallRestart() {}
 
 void MotorManager::setFault(Fault fault)
 {
+    setFault(fault, MotorRuntimeFaultDetail::NONE);
+}
+
+#if LIB_MOTOR_ENABLE_IF_STARTUP
+void MotorManager::clearStartupRestartState()
+{
+    startup_restart_wait_ticks_ = 0U;
+    startup_restart_attempts_ = 0U;
+    startup_restart_pending_ = false;
+}
+
+bool MotorManager::ifStartupProfileComplete() const
+{
+#if LIB_MOTOR_NUMERIC_BACKEND_FIXED_Q15
+    return ctx_.if_profile.complete;
+#else
+    return ctx_.if_profile_complete;
+#endif
+}
+
+void MotorManager::handleIFStartupFailure()
+{
+    const bool can_retry =
+        active_policy_.startup_auto_restart &&
+        startup_restart_attempts_ < active_policy_.startup_max_retry_count;
+    if (!can_retry)
+    {
+        stopForFault(Fault::OBSERVER_LOSS,
+                     MotorRuntimeFaultDetail::IF_SMO_STARTUP_HANDOVER_FAILED);
+        return;
+    }
+
+    ++startup_restart_attempts_;
+    startup_restart_pending_ = true;
+    startup_restart_wait_ticks_ = 0U;
+    transitionToStop(StopMode::COAST, false);
+}
+
+void MotorManager::processPendingStartupRestart()
+{
+    if (!startup_restart_pending_ || state_ != State::STOP)
+    {
+        return;
+    }
+
+    const uint32_t wait_ticks =
+        secondsToTicks(active_policy_.startup_restart_interval_s, dt_);
+    if (wait_ticks > 0U && ++startup_restart_wait_ticks_ < wait_ticks)
+    {
+        return;
+    }
+
+    startup_restart_pending_ = false;
+    startup_restart_wait_ticks_ = 0U;
+    resetIFStartupProfileState();
+    resetIFStartupObserverState();
+#if LIB_MOTOR_NUMERIC_BACKEND_FIXED_Q15
+    prepareIFStartupRuntimeForStart();
+#endif
+    run_requested_ = (target_mode_ != Mode::NONE);
+}
+#endif
+
+void MotorManager::setFault(Fault fault, MotorRuntimeFaultDetail detail)
+{
     fault_ = (Fault)((uint16_t)fault_ | (uint16_t)fault);
+    if (detail != MotorRuntimeFaultDetail::NONE &&
+        runtime_fault_detail_ == MotorRuntimeFaultDetail::NONE)
+    {
+        runtime_fault_detail_ = detail;
+    }
 }
 
 void MotorManager::setConfigFaultDetail(MotorConfigFaultDetail detail)
@@ -329,6 +504,45 @@ void MotorManager::setConfigFaultDetail(MotorConfigFaultDetail detail)
 void MotorManager::stopForFault(Fault fault)
 {
     Motor_FSM::latchFault(*this, fault);
+}
+
+void MotorManager::stopForFault(Fault fault, MotorRuntimeFaultDetail detail)
+{
+    setFault(fault, detail);
+    Motor_FSM::latchFault(*this, fault);
+}
+
+void MotorManager::pollHardwareFaultLatch()
+{
+    if (config_.hal == nullptr ||
+        config_.hal->read_hardware_fault_flags == nullptr)
+    {
+        return;
+    }
+
+    const uint32_t flags = config_.hal->read_hardware_fault_flags();
+    if (flags == MOTOR_HAL_HW_FAULT_NONE)
+    {
+        return;
+    }
+
+    hardware_fault_flags_ |= flags;
+    setFault(Fault::OVERCURRENT, hardwareFaultDetailFromFlags(flags));
+}
+
+void MotorManager::clearRuntimeFaultDetail()
+{
+    if (config_.hal != nullptr &&
+        config_.hal->clear_hardware_fault_flags != nullptr)
+    {
+        const uint32_t clear_flags =
+            (hardware_fault_flags_ != MOTOR_HAL_HW_FAULT_NONE)
+                ? hardware_fault_flags_
+                : MOTOR_HAL_HW_FAULT_ALL;
+        config_.hal->clear_hardware_fault_flags(clear_flags);
+    }
+    runtime_fault_detail_ = MotorRuntimeFaultDetail::NONE;
+    hardware_fault_flags_ = MOTOR_HAL_HW_FAULT_NONE;
 }
 
 bool MotorManager::validateControlFeedbackSource()

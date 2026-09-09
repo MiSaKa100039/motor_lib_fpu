@@ -15,11 +15,16 @@ inline void ApplyControlConfig(Lib_Motor::MotorConfig& cfg)
      * startup_target_mode:
      *   用户调用 start() 后默认进入的模式。
      *   正常应用在这里配置, 调试宏只在 Platform_Motor.cpp 中临时覆盖它。
+     *
+     * command_direction:
+     *   API 正方向到内部电机方向的映射, 只允许 +1/-1。
+     *   -1 表示用户给 +rpm 时, 内部按反向旋转。
      */
     cfg.control.default_control_method = Lib_Motor::ControlMethod::FOC_SPEED;
     cfg.control.modulation = Lib_Motor::ModulationMethod::SVPWM;
     cfg.control.startup_target_mode = Lib_Motor::Mode::VELOCITY_CONTROL;
-    cfg.control.control_freq_hz = 20000.0f;
+    cfg.control.control_freq_hz = 12000.0f;
+    cfg.control.command_direction = 1;
 
     /* ===================== [15] 电流环 PI 参数 ===================== */
     /*

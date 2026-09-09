@@ -109,7 +109,6 @@ target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE
     Lib/Motor/Core/Sampling
     Lib/Motor/Public
     Lib/Motor/Control/Utils
-    Lib/Motor/Common/Math
     Lib/Sensor
     Lib/Sensor/HALL3
     Lib/Sensor/ABZ

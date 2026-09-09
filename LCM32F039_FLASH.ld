@@ -81,25 +81,26 @@ SECTIONS
 
     _sidata = LOADADDR(.data);
 
-    .data :
+    /* 64 位定点状态要求 8 字节对齐，RAM 段的 VMA/LMA 间隙须保持一致。 */
+    .data : ALIGN(8)
     {
         . = ALIGN(4);
         _sdata = .;
         *(.data)
         *(.data*)
-        . = ALIGN(4);
+        . = ALIGN(8);
         _edata = .;
     } > RAM AT > FLASH :ram
 
     .bss (NOLOAD) :
     {
-        . = ALIGN(4);
+        . = ALIGN(8);
         _sbss = .;
         __bss_start__ = _sbss;
         *(.bss)
         *(.bss*)
         *(COMMON)
-        . = ALIGN(4);
+        . = ALIGN(8);
         _ebss = .;
         __bss_end__ = _ebss;
     } > RAM :ram

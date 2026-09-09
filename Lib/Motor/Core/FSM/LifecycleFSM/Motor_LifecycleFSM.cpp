@@ -23,14 +23,30 @@ Motor_LifecycleFSM::StartRequestKind Motor_LifecycleFSM::classifyStartRequest(Mo
 
     switch (target_mode)
     {
+#if LIB_MOTOR_ENABLE_DEBUG_PWM_MANUAL
         case Mode::DEBUG_PWM_MANUAL:
+#endif
+#if LIB_MOTOR_ENABLE_DEBUG_CURRENT_LOCK
         case Mode::DEBUG_CURRENT_LOCK:
+#endif
+#if LIB_MOTOR_ENABLE_DEBUG_HFI_OBSERVER
         case Mode::DEBUG_HFI_OBSERVER:
+#endif
+#if LIB_MOTOR_ENABLE_DEBUG_VF_CONTROL
         case Mode::DEBUG_VF_DRAG:
+#endif
+#if LIB_MOTOR_ENABLE_DEBUG_IF_CONTROL
         case Mode::DEBUG_IF_DRAG:
+#endif
+#if LIB_MOTOR_ENABLE_DEBUG_IF_SMO_OBSERVER
         case Mode::DEBUG_IF_SMO_OBSERVER:
+#endif
+#if LIB_MOTOR_ENABLE_DEBUG_IF_HFI_OBSERVER
         case Mode::DEBUG_IF_HFI_OBSERVER:
+#endif
+#if LIB_MOTOR_ENABLE_DEBUG_ANY
             return StartRequestKind::Debug;
+#endif
 
         case Mode::TORQUE_CONTROL:
         case Mode::VELOCITY_CONTROL:
@@ -68,7 +84,7 @@ void Motor_LifecycleFSM::enterRun(MotorManager& m, int initial_phase_value)
 
     m.ctx_.fsm_timer_ticks = 0U;
 
-#if LIB_MOTOR_ENABLE_IF_STARTUP || LIB_MOTOR_ENABLE_DANGEROUS_TEST_API
+#if LIB_MOTOR_ENABLE_IF_STARTUP || LIB_MOTOR_ENABLE_DEBUG_VF_CONTROL || LIB_MOTOR_ENABLE_DEBUG_IF_ANY
     m.if_angle_gen_.reset();
 #endif
 
@@ -123,13 +139,11 @@ void Motor_LifecycleFSM::step(MotorManager& m)
 void Motor_LifecycleFSM::handleInit(MotorManager& m)
 {
     m.ctx_.calib_counter = 0U;
-    m.ctx_.calib_accum_ia = 0.0f;
-    m.ctx_.calib_accum_ib = 0.0f;
-    m.ctx_.calib_accum_ic = 0.0f;
-    m.ctx_.calib_accum_single_shunt_first = 0.0f;
-    m.ctx_.calib_accum_single_shunt_second = 0.0f;
+    m.ctx_.calib_accum_ia = 0;
+    m.ctx_.calib_accum_ib = 0;
+    m.ctx_.calib_accum_ic = 0;
 #if MOTOR_BUILD_HAS_BUS_CURRENT
-    m.ctx_.calib_accum_ibus = 0.0f;
+    m.ctx_.calib_accum_ibus = 0;
 #endif
     m.setState(State::ADC_CAL);
 }
@@ -144,6 +158,13 @@ void Motor_LifecycleFSM::handleAdcCal(MotorManager& m)
 
 void Motor_LifecycleFSM::handleStop(MotorManager& m)
 {
+    // STOP 仍需消费新的停机方式，允许释放已保持的低边制动。
+    if (m.command_state_ == CommandState::STOP_REQUESTED)
+    {
+        m.transitionToStop(m.stop_mode_, true);
+        return;
+    }
+
     if (!m.run_requested_)
     {
         return;

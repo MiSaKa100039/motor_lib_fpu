@@ -27,7 +27,6 @@ public:
 
     /* Iq 目标限幅: 绝对值钳位 + 接近限速时的保护削减 */
     static float limitIqReference(const MotorConfig& cfg,
-                                  Mode mode,
                                   float speed_rpm,
                                   float iq_ref);
 

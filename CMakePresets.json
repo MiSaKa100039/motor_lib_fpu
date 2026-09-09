@@ -9,11 +9,11 @@
             "toolchainFile": "${sourceDir}/cmake/gcc-arm-none-eabi.cmake",
             "cacheVariables": {
                 "LCA039_CLOCK_SOURCE": "RCH",
-                "LCA039_SYSCLK_HZ": "72000000",
+                "LCA039_SYSCLK_HZ": "96000000",
                 "LCA039_OSCH_HZ": "16000000",
                 "LCA039_APB0_DIV": "1",
                 "LCA039_APB1_DIV": "1",
-                "LCA039_VDD_MV": "3300",
+                "LCA039_VDD_MV": "5000",
                 "LCA039_FIRMWARE_MODE": "NORMAL",
                 "MOTOR_PLATFORM_ENABLE_VOFA": "ON"
             }

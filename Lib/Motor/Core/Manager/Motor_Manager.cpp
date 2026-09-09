@@ -1,12 +1,28 @@
 #include "Motor_Manager.h"
 
 #include "../FSM/Motor_FSM.h"
-#include "../../Common/Math/FocMath.h"
+#include "../../Control/Utils/FocMath.h"
 
 #include <cmath>
 
 namespace Lib_Motor
 {
+
+/* 临时 PA5 分段探针，测完后移除。 */
+constexpr uint32_t kGpioaBsrrAddress = 0x4800001CUL;
+constexpr uint32_t kPa5ScopeProbePin = (1UL << 5);
+
+static inline void setPa5ScopeProbe()
+{
+    *reinterpret_cast<volatile uint32_t*>(kGpioaBsrrAddress) =
+        kPa5ScopeProbePin;
+}
+
+static inline void resetPa5ScopeProbe()
+{
+    *reinterpret_cast<volatile uint32_t*>(kGpioaBsrrAddress) =
+        (kPa5ScopeProbePin << 16U);
+}
 
 static inline float clampFloatFast(float value, float low, float high)
 {
@@ -15,75 +31,36 @@ static inline float clampFloatFast(float value, float low, float high)
     return value;
 }
 
-void MotorManager::prepareSingleShuntSampling()
+#if LIB_MOTOR_NUMERIC_BACKEND_FIXED_Q15 && MOTOR_BUILD_NTC_SLOTS > 0
+static int16_t temperatureCToDeci(float value)
 {
-    if (config_.sensor.current_sense_mode != CurrentSenseMode::SINGLE_SHUNT)
+    if (!std::isfinite(value))
     {
-        return;
+        return 32767;
     }
 
-    MotorSingleShuntSamplePlan plan;
-    if (!MotorSingleShunt::buildSamplePlan(ctx_.duty_a,
-                                           ctx_.duty_b,
-                                           ctx_.duty_c,
-                                           config_.limit.max_duty_cycle,
-                                           config_.sensor.single_shunt_min_sample_window_s,
-                                           config_.control.control_freq_hz,
-                                           plan))
-    {
-        ctx_.single_shunt_sample_plan = MotorSingleShuntSamplePlan{};
-        if (config_.hal != nullptr &&
-            config_.hal->apply_current_sample_schedule != nullptr)
-        {
-            ctx_.current_sample_schedule =
-                MotorSingleShunt::toCurrentSampleSchedule(ctx_.single_shunt_sample_plan);
-            config_.hal->apply_current_sample_schedule(&ctx_.current_sample_schedule);
-        }
-        ctx_.duty_a = 0.0f;
-        ctx_.duty_b = 0.0f;
-        ctx_.duty_c = 0.0f;
-        setFault(Fault::PARAM_ERROR);
-        return;
-    }
+    const float scaled = value * 10.0f;
+    int32_t rounded = (scaled >= 0.0f)
+        ? static_cast<int32_t>(scaled + 0.5f)
+        : static_cast<int32_t>(scaled - 0.5f);
 
-    ctx_.single_shunt_sample_plan = plan;
-    if (config_.hal != nullptr &&
-        config_.hal->apply_current_sample_schedule != nullptr)
+    if (rounded > 32767)
     {
-        ctx_.current_sample_schedule =
-            MotorSingleShunt::toCurrentSampleSchedule(ctx_.single_shunt_sample_plan);
-        config_.hal->apply_current_sample_schedule(&ctx_.current_sample_schedule);
+        return 32767;
     }
+    if (rounded < -32768)
+    {
+        return -32768;
+    }
+    return static_cast<int16_t>(rounded);
 }
-
-void MotorManager::disableSingleShuntSamplingSchedule()
-{
-    if (config_.sensor.current_sense_mode != CurrentSenseMode::SINGLE_SHUNT)
-    {
-        return;
-    }
-
-    if (ctx_.single_shunt_sample_plan.valid == 0U &&
-        ctx_.current_sample_schedule.enabled == 0U)
-    {
-        return;
-    }
-
-    ctx_.single_shunt_sample_plan = MotorSingleShuntSamplePlan{};
-    ctx_.current_sample_schedule = MotorCurrentSampleSchedule{};
-    if (config_.hal != nullptr &&
-        config_.hal->apply_current_sample_schedule != nullptr)
-    {
-        config_.hal->apply_current_sample_schedule(&ctx_.current_sample_schedule);
-    }
-}
+#endif
 
 MotorManager::MotorManager(const MotorConfig& config)
     : config_(config)
     , active_policy_(config.default_run_policy)
     , pending_policy_(config.default_run_policy)
     , ctx_()
-    , fast_ctx_()
     , controller_()
 {
     // 单次控制周期时间 (秒): dt_ = 1 / control_freq_hz
@@ -126,6 +103,8 @@ void MotorManager::init()
     run_phase_   = RunPhase::NONE;
     fault_       = Fault::NONE;
     config_fault_detail_ = MotorConfigFaultDetail::NONE;
+    runtime_fault_detail_ = MotorRuntimeFaultDetail::NONE;
+    hardware_fault_flags_ = MOTOR_HAL_HW_FAULT_NONE;
     safety_state_ = SafetyState::CLEAR;
     command_state_ = CommandState::IDLE;
     stream_state_ = StreamState::NONE;
@@ -134,6 +113,10 @@ void MotorManager::init()
     stop_state_ = StopState::IDLE;
     energy_state_ = EnergyState::IDLE;
     event_       = MotorEvent();
+#if LIB_MOTOR_ENABLE_SMO_OBSERVER
+    resetSmoAngleDirectionLatch();
+#endif
+    clearRuntimeFaultDetail();
     active_policy_ = config_.default_run_policy;
     pending_policy_ = config_.default_run_policy;
 #if LIB_MOTOR_ENABLE_AUTO_IDENTIFY
@@ -148,11 +131,21 @@ void MotorManager::init()
 
     /* ================================================================
      * [B] Runtime 上下文清零 (传感器读数/变换中间量/控制输出/故障计数等)
-     * ================================================================ */
+    * ================================================================ */
     ctx_ = RuntimeCtx{};
-    fast_ctx_ = FastRuntimeCtx{};
-#if LIB_MOTOR_ENABLE_DANGEROUS_TEST_API
+#if LIB_MOTOR_NUMERIC_BACKEND_FIXED_Q15 && MOTOR_BUILD_NTC_SLOTS > 0
+    for (uint8_t i = 0; i < MOTOR_BUILD_NTC_SLOTS; ++i)
+    {
+        ctx_.ntc_over_temp_deci_c[i] = temperatureCToDeci(config_.sensor.ntc[i].over_temp_c);
+    }
+#endif
+#if LIB_MOTOR_ENABLE_DEBUG_PROFILE_ANY
+#if LIB_MOTOR_NUMERIC_BACKEND_FIXED_Q15
+    ctx_.debug_ramp_ticks =
+        (dt_ > 0.0f) ? static_cast<uint32_t>((2.0f / dt_) + 0.5f) : 0U;
+#else
     ctx_.debug_ramp_time_s = 2.0f; // 默认斜坡时间
+#endif
 #endif
     ctx_.sensor_health = SensorHealth::NOT_CONFIGURED;
 #if MOTOR_BUILD_ENABLE_REDUNDANT_SENSOR
@@ -189,9 +182,11 @@ void MotorManager::init()
      *   V_ADC = raw_adc * V_ref / adc_res
      *   其中 scale = V_ref / adc_res * divider_ratio
      * ================================================================ */
+#if LIB_MOTOR_NUMERIC_BACKEND_FIXED_Q15
+    configureFixedRuntimeScales();
+#else
     float adc_res = config_.sensor.adc_resolution;
     float v_ref   = config_.sensor.adc_v_ref;
-
     if (config_.sensor.current_sensor_type == CurrentSensorType::HALL_SENSOR)
     {
         // Hall 传感器: ADC -> mV -> A
@@ -211,6 +206,7 @@ void MotorManager::init()
 #if MOTOR_BUILD_HAS_PHASE_VOLTAGE
     float vphase_divider_ratio = (config_.sensor.vphase_r_up + config_.sensor.vphase_r_down) / config_.sensor.vphase_r_down;
     ctx_.phase_voltage_scale_V_per_count = v_ref / adc_res * vphase_divider_ratio;
+#endif
 #endif
 
     /* ================================================================
@@ -251,15 +247,28 @@ void MotorManager::init()
      * [E] PID 控制器参数初始化 (从配置读取 KP/KI/KD/OutputLimit/RampRate)
      * ================================================================ */
     controller_.init(config_);
+#if LIB_MOTOR_NUMERIC_BACKEND_FIXED_Q15
+    configureFixedCurrentPidRuntime(true);
+#endif
 
     /* ================================================================
      * [F] 观测器初始化 (SMO/传感器观测器/冗余传感器/输出传感器)
      * ================================================================ */
-#if LIB_MOTOR_ENABLE_SMO
+#if LIB_MOTOR_ENABLE_SMO_OBSERVER
     /* [P2] SMO 用 effective R/L (来源由 physical.electrical_param_source 决定) */
+#if LIB_MOTOR_NUMERIC_BACKEND_FIXED_Q15
     smo_.init(config_.physical.rs_effective(), config_.physical.ls_effective(),
               config_.observer.smo_gain,
-              config_.observer.smo_pll_kp, config_.observer.smo_pll_ki);
+              config_.observer.smo_pll_kp, config_.observer.smo_pll_ki,
+              runtimeCurrentBaseA(ctx_), runtimeControlVoltageBaseV(ctx_),
+              runtimeSpeedBaseRpm(ctx_), dt_, config_.physical.pole_pairs,
+              config_.observer.smo_bemf_lpf_cutoff_hz);
+#else
+    smo_.init(config_.physical.rs_effective(), config_.physical.ls_effective(),
+              config_.observer.smo_gain,
+              config_.observer.smo_pll_kp, config_.observer.smo_pll_ki,
+              config_.observer.smo_bemf_lpf_cutoff_hz);
+#endif
     smo_.setValidityCriteria(
         // [P4] 启动期 IF→SMO 单向加速切换阈值 (旧 switch_speed_rpm)
         config_.observer.hfi_to_smo_startup_rpm * TWO_PI * config_.physical.pole_pairs / 60.0f,
@@ -282,6 +291,7 @@ void MotorManager::init()
               config_.observer.hfi_pll_integral_limit_rad_s,
               config_.observer.hfi_pll_speed_limit_rad_s);
 #endif
+#if LIB_MOTOR_ENABLE_SENSOR
     rotor_sensor_obs_.init(config_.position.rotor_sensor, config_.physical.pole_pairs);
 #if MOTOR_BUILD_ENABLE_REDUNDANT_SENSOR
     redundant_sensor_obs_.init(config_.position.redundant_rotor_sensor, config_.physical.pole_pairs);
@@ -309,19 +319,22 @@ void MotorManager::init()
         config_.position.output_sensor->init(config_.position.output_sensor->ctx);
     }
 #endif
+#endif
     /* ================================================================
      * [G] IF 强拖角度发生器初始化
      * ================================================================ */
-#if LIB_MOTOR_ENABLE_IF_STARTUP || LIB_MOTOR_ENABLE_DANGEROUS_TEST_API
+#if LIB_MOTOR_ENABLE_IF_STARTUP || LIB_MOTOR_ENABLE_DEBUG_VF_CONTROL || LIB_MOTOR_ENABLE_DEBUG_IF_ANY
+#if LIB_MOTOR_NUMERIC_BACKEND_FIXED_Q15
+    if_angle_gen_.init(config_.control.control_freq_hz,
+                       config_.physical.pole_pairs,
+                       runtimeSpeedBaseRpm(ctx_));
+#else
     if_angle_gen_.init(config_.control.control_freq_hz, config_.physical.pole_pairs);
 #endif
-#if LIB_MOTOR_ENABLE_IF_STARTUP
-    drag_current_override_ = 0.0f;
 #endif
-
     /* ★ 安全: 初始化完成后强制关闭 PWM 输出 */
     if (config_.hal && config_.hal->pwm_disable) config_.hal->pwm_disable();
-    if (config_.hal && config_.hal->set_duty) config_.hal->set_duty(0.0f, 0.0f, 0.0f);
+    writePwmZeroOutputs();
 }
 
 /* reset() -- 与 init() 类似, 上电重新初始化上下文和自动标定 */
@@ -345,25 +358,22 @@ void MotorManager::enterIsrDiagnostic(Fault fault)
     run_phase_ = RunPhase::NONE;
     state_ = State::ISR_DIAGNOSTIC;
     fault_ = fault;
+    runtime_fault_detail_ = MotorRuntimeFaultDetail::NONE;
+    hardware_fault_flags_ = MOTOR_HAL_HW_FAULT_NONE;
     safety_state_ = (fault == Fault::NONE) ? SafetyState::CLEAR : SafetyState::FAULT_LATCHED;
     command_state_ = (fault == Fault::NONE) ? CommandState::IDLE : CommandState::FAULTED;
     stream_state_ = StreamState::NONE;
     angle_state_ = AngleState::NONE;
     stop_state_ = StopState::IDLE;
     energy_state_ = EnergyState::IDLE;
-    ctx_.duty_a = 0.0f;
-    ctx_.duty_b = 0.0f;
-    ctx_.duty_c = 0.0f;
-    ctx_.single_shunt_sample_plan = MotorSingleShuntSamplePlan{};
-    ctx_.current_sample_schedule = MotorCurrentSampleSchedule{};
+    ctx_.duty_a = 0;
+    ctx_.duty_b = 0;
+    ctx_.duty_c = 0;
     if (config_.hal != nullptr && config_.hal->pwm_disable != nullptr)
     {
         config_.hal->pwm_disable();
     }
-    if (config_.hal != nullptr && config_.hal->set_duty != nullptr)
-    {
-        config_.hal->set_duty(0.0f, 0.0f, 0.0f);
-    }
+    writePwmZeroOutputs();
 }
 
 void MotorManager::setMode(Mode mode)
@@ -371,8 +381,105 @@ void MotorManager::setMode(Mode mode)
     Motor_FSM::selectMode(*this, mode);
 }
 
+void MotorManager::writePwmOutputs()
+{
+    if (config_.hal == nullptr)
+    {
+        return;
+    }
+
+#if LIB_MOTOR_NUMERIC_BACKEND_FIXED_Q15
+    if (config_.hal->set_duty_q15 != nullptr)
+    {
+        config_.hal->set_duty_q15(ctx_.duty_a,
+                                  ctx_.duty_b,
+                                  ctx_.duty_c);
+    }
+    return;
+#else
+    if (config_.hal->set_duty != nullptr)
+    {
+        config_.hal->set_duty(ctx_.duty_a, ctx_.duty_b, ctx_.duty_c);
+    }
+#endif
+}
+
+void MotorManager::writePwmZeroOutputs()
+{
+    if (config_.hal == nullptr)
+    {
+        return;
+    }
+
+#if LIB_MOTOR_NUMERIC_BACKEND_FIXED_Q15
+    if (config_.hal->set_duty_q15 != nullptr)
+    {
+        config_.hal->set_duty_q15(0, 0, 0);
+    }
+#else
+    if (config_.hal->set_duty != nullptr)
+    {
+        config_.hal->set_duty(0.0f, 0.0f, 0.0f);
+    }
+#endif
+}
+
+void MotorManager::serviceSlowMonitor()
+{
+    if (state_ == State::UNINITIALIZED ||
+        state_ == State::ISR_DIAGNOSTIC)
+    {
+        return;
+    }
+
+    /* 兼容入口: 安全刷新已由 tick() 每 ADC tick 执行, 外部不再需要依赖本函数。 */
+    updateSensorMeasurements();
+
+#if LIB_MOTOR_ENABLE_SENSOR
+    if (state_ != State::RUN)
+    {
+        updatePositionSensorMeasurement();
+    }
+#endif
+
+    if (state_ != State::INIT && state_ != State::ADC_CAL)
+    {
+        runSafetyCheck();
+#if LIB_MOTOR_ENABLE_STALL_PROTECTION
+        processPendingStallRestart();
+#endif
+#if LIB_MOTOR_ENABLE_IF_STARTUP
+        processPendingStartupRestart();
+#endif
+        if (fault_ != Fault::NONE || state_ == State::ERROR)
+        {
+            Motor_FSM::step(*this);
+        }
+    }
+}
+
 void MotorManager::requestStart()
 {
+#if LIB_MOTOR_ENABLE_IF_STARTUP
+    clearStartupRestartState();
+    if (active_policy_.startup_source == StartupSource::IF)
+    {
+        resetIFStartupProfileState();
+        resetIFStartupObserverState();
+    }
+#endif
+#if LIB_MOTOR_ENABLE_SMO_OBSERVER
+    resetSmoAngleDirectionLatch();
+#endif
+#if LIB_MOTOR_ENABLE_IF_STARTUP && LIB_MOTOR_NUMERIC_BACKEND_FIXED_Q15
+    if (active_policy_.startup_source == StartupSource::IF)
+    {
+        prepareIFStartupRuntimeForStart();
+    }
+#endif
+#if LIB_MOTOR_ENABLE_DEBUG_PROFILE_ANY && LIB_MOTOR_NUMERIC_BACKEND_FIXED_Q15
+    prepareDebugOpenLoopAngleRampForStart();
+#endif
     Motor_FSM::requestStart(*this);
 }
 
@@ -386,11 +493,17 @@ void MotorManager::requestStart()
  */
 void MotorManager::requestStop(StopMode mode)
 {
+#if LIB_MOTOR_ENABLE_IF_STARTUP
+    clearStartupRestartState();
+#endif
     Motor_FSM::requestStop(*this, mode);
 }
 
 void MotorManager::requestEmergencyStop()
 {
+#if LIB_MOTOR_ENABLE_IF_STARTUP
+    clearStartupRestartState();
+#endif
     Motor_FSM::requestEmergencyStop(*this);
 }
 
@@ -430,17 +543,20 @@ void MotorManager::clearFaultAndStop()
  *   ├──────────────────────────────────────────────────────────────────┤
  *   │ fsm_timer_ticks++                                                │
  *   │                                                                  │
- *   │ [1] updateSensorMeasurements()                                   │
- *   │     ADC 采样 -> 物理量(电流/电压/温度) + 低通滤波                  │
+ *   │ [1] ISR_DIAGNOSTIC 早退                                           │
+ *   │     普通 ERROR 状态仍继续完整 tick, 只由 state gate 禁止 PWM 输出    │
  *   │                                                                  │
- *   │ [2] runSafetyCheck()                                             │
- *   │     电流/电压/温度/传感器检查 -> 合并到 fault_ 寄存器              │
+ *   │ [2] updateSensorMeasurements()                                   │
+ *   │     读取 BSP raw 快照 -> q15 快环输入 + float 物理量/低通监控       │
  *   │                                                                  │
- *   │ [3] Motor_FSM::step(*this)                                       │
+ *   │ [3] runSafetyCheck()                                             │
+ *   │     硬件 latch + LPF 后电流/电压/温度检查 -> 合并到 fault_ 寄存器    │
+ *   │                                                                  │
+ *   │ [4] Motor_FSM::step(*this)                                       │
  *   │     故障快速关断 (fault!=NONE -> PWM关闭 -> ERROR)                │
  *   │     状态机转换: INIT->ADC_CAL->STOP / STOP->RUN / RUN->ERROR      │
  *   │                                                                  │
- *   │ [4] 控制策略分支 (由 state_ / mode_ 决定)                         │
+ *   │ [5] 控制策略分支 (由 state_ / mode_ 决定)                         │
  *   │     ADC_CAL  -> runAdcCalibration()                               │
  *   │     RUN + DEBUG_PWM   -> runPWMManual()                          │
  *   │     RUN + CURRENT_LOCK -> runCurrentLock()                        │
@@ -449,47 +565,45 @@ void MotorManager::clearFaultAndStop()
  *   │     RUN + CALIB_RL    -> runCurrentLock() (拖拽辨识)               │
  *   │     RUN + 其它        -> runControlLoop() (FOC 闭环)              │
  *   │                                                                  │
- *   │ [5] Duty 限幅: clamp(duty, 0, max_duty_cycle)                    │
+ *   │ [6] Duty 限幅: clamp(duty, 0, max_duty_cycle)                    │
  *   │                                                                  │
- *   │ [6] PWM 输出: 仅在 RUN 状态调用 set_duty()                        │
+ *   │ [7] PWM 输出: 仅在 RUN 状态调用 set_duty()/set_duty_q15()         │
  *   │     非RUN: MOE 安全关断 FSM 控制 (pwm_coast/pwm_disable)         │
  *   └──────────────────────────────────────────────────────────────────┘
  */
+
 void MotorManager::tick()
 {
     ctx_.fsm_timer_ticks++;  // 每个 tick 递增, 由 FSM 用于超时判断 (如 ALIGNMENT 持续时间)
 
-    /* [1] 相电流采样 + 物理量换算 + 低通滤波 */
+    /* [1] ISR 诊断态只保留中断节拍, 不运行采样、保护和控制链。 */
     if (state_ == State::ISR_DIAGNOSTIC)
     {
         return;
     }
 
-    updateSensorMeasurements();
-    updatePositionSensorMeasurement();
+    updateSensorMeasurements(); //10us
 
-    /*
-     * Keep telemetry fresh after a latched fault. ERROR must not run safety,
-     * control, or PWM output, but ADC-derived monitor values should continue
-     * to update for bring-up and fault diagnosis.
-     */
-    if (state_ == State::ERROR)
-    {
-        Motor_FSM::step(*this);
-        return;
-    }
+#if LIB_MOTOR_ENABLE_SENSOR
+    updatePositionSensorMeasurement();
+#endif
 
     /* [2] 安全检查 (合并到 fault_ 寄存器) */
-    runSafetyCheck();
+    runSafetyCheck();   //3us
 
+#if LIB_MOTOR_ENABLE_STALL_PROTECTION
     /* 堵转自动重启: 检查是否处于 STOP 并需要重新触发 run_requested_ */
     processPendingStallRestart();
+#endif
+#if LIB_MOTOR_ENABLE_IF_STARTUP
+    processPendingStartupRestart();
+#endif
 
     /* [3] 状态机编排 -- 故障锁存 + 状态转换 */
-    Motor_FSM::step(*this);
+    Motor_FSM::step(*this); //1.7us
 
     /* 预加载回放必须在控制环读取目标前服务, 当前阶段为空框架。 */
-    serviceSetpointPlayback();
+    serviceSetpointPlayback();  //150ns
 
     /* ================================================================
      * [4] 控制策略: ADC 校准
@@ -516,7 +630,8 @@ void MotorManager::tick()
      *
      * 注意: 静默校准仅在 STOP 状态执行, 进入 STOP 时复位
      * ================================================================ */
-    if (state_ == State::STOP)
+    // 短路制动时绕组仍可能有电流，不能把该电流重新标定为零点。
+    if (state_ == State::STOP && stop_state_ != StopState::ELECTRICAL_BRAKE)
     {
         if (ctx_.silent_calib_active)
         {
@@ -532,21 +647,30 @@ void MotorManager::tick()
             if (ctx_.silent_calib_timer_ticks >= auto_calib_interval_ticks_)
             {
                 ctx_.calib_counter = 0;
-                ctx_.calib_accum_ia = 0.0f;
-                ctx_.calib_accum_ib = 0.0f;
-                ctx_.calib_accum_ic = 0.0f;
-                ctx_.calib_accum_single_shunt_first = 0.0f;
-                ctx_.calib_accum_single_shunt_second = 0.0f;
+                ctx_.calib_accum_ia = 0;
+                ctx_.calib_accum_ib = 0;
+                ctx_.calib_accum_ic = 0;
 #if MOTOR_BUILD_HAS_BUS_CURRENT
-                ctx_.calib_accum_ibus = 0.0f;
+                ctx_.calib_accum_ibus = 0;
 #endif
                 ctx_.silent_calib_active = true;
                 ctx_.silent_calib_timer_ticks = 0;
             }
         }
     }
+
     else
     {
+        if (ctx_.silent_calib_active)
+        {
+            ctx_.calib_counter = 0U;
+            ctx_.calib_accum_ia = 0;
+            ctx_.calib_accum_ib = 0;
+            ctx_.calib_accum_ic = 0;
+#if MOTOR_BUILD_HAS_BUS_CURRENT
+            ctx_.calib_accum_ibus = 0;
+#endif
+        }
         ctx_.silent_calib_timer_ticks = 0;
         ctx_.silent_calib_active = false;
     }
@@ -557,7 +681,11 @@ void MotorManager::tick()
      * ================================================================ */
     if (state_ == State::RUN)
     {
+#if LIB_MOTOR_ENABLE_AUTO_IDENTIFY
         const bool is_rl_identify = (target_mode_ == Mode::CALIB_RL_IDENTIFY);
+#else
+        constexpr bool is_rl_identify = false;
+#endif
 
         if (mode_ != target_mode_ && validateModeSelection(target_mode_) != Result::Ok)
         {
@@ -566,24 +694,33 @@ void MotorManager::tick()
         }
         mode_ = target_mode_;  // 强制执行: 由顶层命令驱动模式切换
 
-#if LIB_MOTOR_ENABLE_DANGEROUS_TEST_API
+#if LIB_MOTOR_ENABLE_DEBUG_ANY
         bool is_debug_direct =
             (run_phase_ == RunPhase::RUN_DIRECT) &&
-            (mode_ == Mode::DEBUG_PWM_MANUAL ||
+            (
+#if LIB_MOTOR_ENABLE_DEBUG_PWM_MANUAL
+             mode_ == Mode::DEBUG_PWM_MANUAL ||
+#endif
+#if LIB_MOTOR_ENABLE_DEBUG_CURRENT_LOCK
              mode_ == Mode::DEBUG_CURRENT_LOCK ||
-#if LIB_MOTOR_ENABLE_HFI
+#endif
+#if LIB_MOTOR_ENABLE_DEBUG_HFI_OBSERVER
              mode_ == Mode::DEBUG_HFI_OBSERVER ||
 #endif
-#if LIB_MOTOR_ENABLE_IF_STARTUP
+#if LIB_MOTOR_ENABLE_DEBUG_IF_CONTROL
              mode_ == Mode::DEBUG_IF_DRAG ||
-#if LIB_MOTOR_ENABLE_SMO
+#endif
+#if LIB_MOTOR_ENABLE_DEBUG_IF_SMO_OBSERVER
              mode_ == Mode::DEBUG_IF_SMO_OBSERVER ||
 #endif
-#if LIB_MOTOR_ENABLE_HFI
+#if LIB_MOTOR_ENABLE_DEBUG_IF_HFI_OBSERVER
              mode_ == Mode::DEBUG_IF_HFI_OBSERVER ||
 #endif
-#endif
+#if LIB_MOTOR_ENABLE_DEBUG_VF_CONTROL
              mode_ == Mode::DEBUG_VF_DRAG);
+#else
+             false);
+#endif
 #else
         bool is_debug_direct = false;
 #endif
@@ -606,57 +743,72 @@ void MotorManager::tick()
          *   FORCE_DRAG             -> runIFControl()    (IF 强拖)
          *   SMO_ONLY / SENSOR / 其它 -> runControlLoop()  (FOC 闭环)
          * ================================================================ */
+#if LIB_MOTOR_ENABLE_AUTO_IDENTIFY
         if (is_rl_identify)
         {
             runCurrentLock();
         }
         else if (run_phase_ == RunPhase::RUN_DIRECT)
+#else
+        if (run_phase_ == RunPhase::RUN_DIRECT)
+#endif
         {
             switch (mode_)
             {
-#if LIB_MOTOR_ENABLE_DANGEROUS_TEST_API
+#if LIB_MOTOR_ENABLE_DEBUG_PWM_MANUAL
                 case Mode::DEBUG_PWM_MANUAL:    runPWMManual();   break;
+#endif
+#if LIB_MOTOR_ENABLE_DEBUG_CURRENT_LOCK
                 case Mode::DEBUG_CURRENT_LOCK:  runCurrentLock(); break;
-#if LIB_MOTOR_ENABLE_HFI
+#endif
+#if LIB_MOTOR_ENABLE_DEBUG_HFI_OBSERVER
                 case Mode::DEBUG_HFI_OBSERVER:  runHFIObserverTest(); break;
 #endif
-#if LIB_MOTOR_ENABLE_IF_STARTUP
-                case Mode::DEBUG_IF_DRAG:       runIFControl();   break;
-#if LIB_MOTOR_ENABLE_SMO
+#if LIB_MOTOR_ENABLE_DEBUG_IF_CONTROL
+            case Mode::DEBUG_IF_DRAG:            runIFControl(); break;  //20us
+#endif
+#if LIB_MOTOR_ENABLE_DEBUG_IF_SMO_OBSERVER
                 case Mode::DEBUG_IF_SMO_OBSERVER: runIFControl(); break;
 #endif
-#if LIB_MOTOR_ENABLE_HFI
+#if LIB_MOTOR_ENABLE_DEBUG_IF_HFI_OBSERVER
                 case Mode::DEBUG_IF_HFI_OBSERVER: runIFControl(); break;
 #endif
-#endif
+#if LIB_MOTOR_ENABLE_DEBUG_VF_CONTROL
                 case Mode::DEBUG_VF_DRAG:       runVFControl();   break;
 #endif
-                default:                        runControlLoop(); break;
+                default:                      runControlLoop();   break;
             }
         }
         else
         {
             switch (run_phase_)
             {
-#if LIB_MOTOR_ENABLE_IF_STARTUP
+#if LIB_MOTOR_ENABLE_AUTO_IDENTIFY || LIB_MOTOR_ENABLE_DEBUG_CURRENT_LOCK
                 case RunPhase::ALIGNMENT:   runCurrentLock();   break;  // 初始对齐
+#endif
+#if LIB_MOTOR_ENABLE_IF_STARTUP
                 case RunPhase::FORCE_DRAG:  runIFControl();     break;  // IF 强拖
 #endif
                 default:                    runControlLoop();   break;  // FOC 闭环
             }
         }
     }
-
     /* ================================================================
      * [5] Duty 限幅: 三相占空比 clamp 至 [0, max_duty_cycle]
      *
      * 安全: 硬件 PWM 死区时间需要占空比不超过上限, 另外留有余量防止过调制。
      * 例如 max_duty_cycle = 0.95 (5% 余量)
      * ================================================================ */
+#if LIB_MOTOR_NUMERIC_BACKEND_FIXED_Q15
+    ctx_.duty_a = runtimeClampDuty(ctx_.duty_a, ctx_.max_duty);
+    ctx_.duty_b = runtimeClampDuty(ctx_.duty_b, ctx_.max_duty);
+    ctx_.duty_c = runtimeClampDuty(ctx_.duty_c, ctx_.max_duty);
+#else
     float scale = config_.limit.max_duty_cycle;
     ctx_.duty_a = clampFloatFast(ctx_.duty_a, 0.0f, scale);
     ctx_.duty_b = clampFloatFast(ctx_.duty_b, 0.0f, scale);
     ctx_.duty_c = clampFloatFast(ctx_.duty_c, 0.0f, scale);
+#endif
 
     /* ================================================================
      * [6] PWM 输出: 仅在 RUN 状态输出占空比
@@ -668,17 +820,14 @@ void MotorManager::tick()
      * ================================================================ */
     if (state_ == State::RUN)
     {
-        prepareSingleShuntSampling();
-        config_.hal->set_duty(ctx_.duty_a, ctx_.duty_b, ctx_.duty_c);
-    }
-    else
-    {
-        disableSingleShuntSamplingSchedule();
+        // setPa5ScopeProbe();
+        writePwmOutputs();  //3.28us
+        // resetPa5ScopeProbe();
     }
 
-    /* [P2] Ke 辨识运行期检查: 若 ke_identify_ticks_remaining_>0, 持续递减,
-     * 每过 tick 检查 SMO 收敛 + 高速稳态, 满足后写 identified + 置 event。
-     * 不满足条件时只递减 ticks, 不强制写入 (避免误估)。
+    /* [P2] Ke 辨识运行期预留:
+     * 当前 SMO getEstimatedKe() 保持 0，不会写入有效 identified。
+     * 后续 Identify 层接入有效 Ke 估计后，再复用此完成条件。
      */
 #if LIB_MOTOR_ENABLE_AUTO_IDENTIFY
     if (ke_identify_ticks_remaining_ > 0U)
@@ -688,7 +837,7 @@ void MotorManager::tick()
         const bool valid = (ctx_.smo_estimate.valid &&
                             static_cast<uint32_t>(ctx_.smo_estimate.valid_ticks) >=
                                 2UL * static_cast<uint32_t>(config_.observer.convergence_ticks));
-        const float speed_abs = fabsf(ctx_.speed_rpm);
+        const float speed_abs = fabsf(runtimeSpeedToPhysical(ctx_, ctx_.speed_rpm));
         const float threshold = config_.observer.hfi_to_smo_rpm + config_.observer.switch_hysteresis_rpm;
         if (valid && speed_abs > threshold)
         {

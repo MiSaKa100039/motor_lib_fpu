@@ -2,11 +2,11 @@ include_guard(GLOBAL)
 
 set(LCA039_CLOCK_SOURCE "RCH" CACHE STRING "System clock source: RCH or OSCH")
 set_property(CACHE LCA039_CLOCK_SOURCE PROPERTY STRINGS RCH OSCH)
-set(LCA039_SYSCLK_HZ "16000000" CACHE STRING "Requested system clock in Hz")
+set(LCA039_SYSCLK_HZ "96000000" CACHE STRING "Requested system clock in Hz")
 set(LCA039_OSCH_HZ "16000000" CACHE STRING "External high-speed oscillator frequency in Hz")
 set(LCA039_APB0_DIV "1" CACHE STRING "APB0 divider from 1 to 16")
 set(LCA039_APB1_DIV "1" CACHE STRING "APB1 divider from 1 to 16")
-set(LCA039_VDD_MV "3300" CACHE STRING "Target supply voltage in millivolts")
+set(LCA039_VDD_MV "5000" CACHE STRING "Target supply voltage in millivolts")
 
 string(TOUPPER "${LCA039_CLOCK_SOURCE}" LCA039_CLOCK_SOURCE_NORMALIZED)
 
@@ -29,8 +29,8 @@ else()
     message(FATAL_ERROR "LCA039_CLOCK_SOURCE must be RCH or OSCH, got '${LCA039_CLOCK_SOURCE}'")
 endif()
 
-if(LCA039_SYSCLK_HZ LESS 1 OR LCA039_SYSCLK_HZ GREATER 72000000)
-    message(FATAL_ERROR "LCA039_SYSCLK_HZ must be between 1 and 72000000 Hz")
+if(LCA039_SYSCLK_HZ LESS 1 OR LCA039_SYSCLK_HZ GREATER 96000000)
+    message(FATAL_ERROR "LCA039_SYSCLK_HZ must be between 1 and 96000000 Hz")
 endif()
 
 foreach(variable IN ITEMS LCA039_APB0_DIV LCA039_APB1_DIV)
@@ -41,6 +41,10 @@ endforeach()
 
 if(LCA039_SYSCLK_HZ EQUAL 72000000 AND LCA039_VDD_MV LESS_EQUAL 2800)
     message(FATAL_ERROR "72 MHz operation requires LCA039_VDD_MV greater than 2800")
+endif()
+
+if(LCA039_SYSCLK_HZ GREATER 72000000 AND LCA039_VDD_MV LESS 4500)
+    message(FATAL_ERROR "Above 72 MHz operation requires LCA039_VDD_MV at least 4500 for the 4.0 V LVR level")
 endif()
 
 if(LCA039_SYSCLK_HZ GREATER_EQUAL 64000000 AND LCA039_VDD_MV LESS 2500)
@@ -74,7 +78,7 @@ if(NOT LCA039_SYSCLK_HZ EQUAL LCA039_INPUT_CLOCK_HZ)
                     math(EXPR _output "${_numerator} / ${_denominator}")
                     math(EXPR _vco "${_numerator} / ${_vco_denominator}")
 
-                    if(_vco GREATER_EQUAL 30000000 AND _vco LESS_EQUAL 144000000 AND _output LESS_EQUAL 72000000)
+                    if(_vco GREATER_EQUAL 30000000 AND _vco LESS_EQUAL 192000000 AND _output LESS_EQUAL 96000000)
                         if(_output LESS_EQUAL LCA039_SYSCLK_HZ AND _output GREATER _lca039_nearest_lower)
                             set(_lca039_nearest_lower ${_output})
                         endif()

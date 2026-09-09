@@ -59,9 +59,16 @@ inline int32_t foc_rad_to_q31(float rad)
     /* 归一化到 [-π, π] */
     while (rad >  PI)  rad -= TWO_PI;
     while (rad < -PI)  rad += TWO_PI;
-    /* rad/π ∈ [-1, 1], 乘 2^31 得 q1.31; 用 double 中间量避免溢出 */
-    return static_cast<int32_t>(static_cast<double>(rad) *
-                                (2147483648.0 / 3.14159265358979323846));
+    const float scaled = rad * (2147483647.0f / PI);
+    if (scaled >= 2147483647.0f)
+    {
+        return 2147483647;
+    }
+    if (scaled <= -2147483647.0f)
+    {
+        return static_cast<int32_t>(-2147483647 - 1);
+    }
+    return static_cast<int32_t>(scaled);
 }
 
 /* q1.31 → float [-1, 1) */

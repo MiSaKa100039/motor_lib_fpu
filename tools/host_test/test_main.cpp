@@ -1,16 +1,19 @@
 #include "MotorTestRunner.h"
 
-#include "Motor_API.h"
-#include "Motor_CommandGuard.h"
 #include "Motor_ConfigCheck.h"
-#include "Motor_SingleShunt.h"
-
-#include <cstring>
+#include "Motor_Manager.h"
+#include "Motor_RuntimeMonitor.h"
 
 using namespace Lib_Motor;
 
 namespace
 {
+
+uint16_t g_raw_u = 0U;
+uint16_t g_raw_v = 0U;
+uint16_t g_raw_w = 0U;
+uint16_t g_raw_bus = 0U;
+uint32_t g_hw_flags = MOTOR_HAL_HW_FAULT_NONE;
 
 void noop()
 {
@@ -22,39 +25,29 @@ void setDuty(float, float, float)
 
 void readCurrents(uint16_t* raw_u, uint16_t* raw_v, uint16_t* raw_w, uint16_t* raw_bus)
 {
-    if (raw_u != nullptr) *raw_u = 2048U;
-    if (raw_v != nullptr) *raw_v = 2048U;
-    if (raw_w != nullptr) *raw_w = 2048U;
-    if (raw_bus != nullptr) *raw_bus = 0U;
+    if (raw_u != nullptr) *raw_u = g_raw_u;
+    if (raw_v != nullptr) *raw_v = g_raw_v;
+    if (raw_w != nullptr) *raw_w = g_raw_w;
+    if (raw_bus != nullptr) *raw_bus = g_raw_bus;
 }
 
-uint16_t readVbus()
+uint32_t readHardwareFaultFlags()
 {
-    return 2048U;
+    return g_hw_flags;
 }
 
-bool readSingleShuntPair(uint16_t* raw_first, uint16_t* raw_second)
+void clearHardwareFaultFlags(uint32_t flags)
 {
-    if (raw_first != nullptr) *raw_first = 2048U;
-    if (raw_second != nullptr) *raw_second = 2048U;
-    return true;
+    if (flags == MOTOR_HAL_HW_FAULT_NONE || flags == MOTOR_HAL_HW_FAULT_ALL)
+    {
+        g_hw_flags = MOTOR_HAL_HW_FAULT_NONE;
+        return;
+    }
+    g_hw_flags &= ~flags;
 }
 
-void applyCurrentSampleSchedule(const MotorCurrentSampleSchedule*)
-{
-}
-
-float readSensorAngle(void*)
-{
-    return 0.0f;
-}
-
-bool sensorReady(void*)
-{
-    return true;
-}
-
-MotorHAL_t makeSingleShuntHal()
+MotorHAL_t makeDualHal(uint8_t phase_mask =
+    static_cast<uint8_t>(MOTOR_PHASE_CURRENT_U_VALID | MOTOR_PHASE_CURRENT_V_VALID))
 {
     MotorHAL_t hal{};
     hal.set_duty = setDuty;
@@ -65,34 +58,40 @@ MotorHAL_t makeSingleShuntHal()
     hal.mechanical_brake_engage = noop;
     hal.mechanical_brake_release = noop;
     hal.read_currents_raw = readCurrents;
-    hal.phase_current_valid_mask = 0U;
-    hal.read_vbus_raw = readVbus;
+    hal.phase_current_valid_mask = phase_mask;
     hal.enter_critical = noop;
     hal.exit_critical = noop;
-    hal.read_single_shunt_pair_raw = readSingleShuntPair;
-    hal.apply_current_sample_schedule = applyCurrentSampleSchedule;
+    hal.read_hardware_fault_flags = readHardwareFaultFlags;
+    hal.clear_hardware_fault_flags = clearHardwareFaultFlags;
     return hal;
 }
 
-SensorInterface_t makeSensor()
-{
-    SensorInterface_t sensor{};
-    sensor.read_angle = readSensorAngle;
-    sensor.is_ready = sensorReady;
-    sensor.spec.direction = 1;
-    sensor.spec.cpr = 4096U;
-    return sensor;
-}
-
-MotorConfig makeSingleShuntConfig(const MotorHAL_t& hal)
+MotorConfig makeDualConfig(const MotorHAL_t& hal)
 {
     MotorConfig cfg{};
     cfg.hal = &hal;
-    cfg.sensor.current_sense_mode = CurrentSenseMode::SINGLE_SHUNT;
-    cfg.sensor.current_sensor_type = CurrentSensorType::SHUNT_RESISTOR;
-    cfg.sensor.single_shunt_min_sample_window_s = 1.5e-6f;
-    cfg.control.modulation = ModulationMethod::SVPWM;
+    cfg.physical.pole_pairs = 7U;
     cfg.control.control_freq_hz = 10000.0f;
+    cfg.control.modulation = ModulationMethod::SVPWM;
+    cfg.sensor.current_sense_mode = CurrentSenseMode::DUAL_SENSOR;
+    cfg.sensor.current_sensor_type = CurrentSensorType::SHUNT_RESISTOR;
+    cfg.sensor.adc_v_ref = 1.0f;
+    cfg.sensor.adc_resolution = 1.0f;
+    cfg.sensor.phase_shunt_resistor = 1.0f;
+    cfg.sensor.phase_amp_gain = 1.0f;
+    cfg.sensor.bus_shunt_resistor = 1.0f;
+    cfg.sensor.bus_amp_gain = 1.0f;
+    cfg.sensor.phase_current_lpf_tf_s = 0.0f;
+    cfg.sensor.bus_current_lpf_tf_s = 0.0f;
+    cfg.sensor.bus_voltage_lpf_tf_s = 0.0f;
+    cfg.sensor.phase_voltage_lpf_tf_s = 0.0f;
+    cfg.sensor.has_bus_voltage = false;
+    cfg.sensor.has_bus_current = true;
+    cfg.sensor.has_phase_voltage = false;
+    cfg.limit.max_phase_current_a = 100.0f;
+    cfg.limit.max_bus_current_a = 100.0f;
+    cfg.limit.over_voltage_v = 30.0f;
+    cfg.limit.under_voltage_v = 0.0f;
     cfg.observer.allow_smo_closed_loop = true;
     cfg.observer.rotor_stationary_guarantee = RotorStationaryGuarantee::LOW_SIDE_BRAKE;
     cfg.default_run_policy.startup_source = StartupSource::IF;
@@ -100,43 +99,10 @@ MotorConfig makeSingleShuntConfig(const MotorHAL_t& hal)
     return cfg;
 }
 
-MotorHardwareConfig makeHardware(const MotorConfig& cfg)
+bool hasFault(Fault faults, Fault expected)
 {
-    MotorHardwareConfig hardware{};
-    hardware.hal = cfg.hal;
-    hardware.physical = cfg.physical;
-    hardware.limit = cfg.limit;
-    hardware.sensor = cfg.sensor;
-    hardware.position = cfg.position;
-    return hardware;
-}
-
-MotorAlgorithmParam makeAlgorithm(const MotorConfig& cfg)
-{
-    MotorAlgorithmParam algorithm{};
-    algorithm.observer = cfg.observer;
-    algorithm.control = cfg.control;
-    algorithm.motion = cfg.motion;
-    algorithm.brake = cfg.brake;
-    algorithm.identify = cfg.identify;
-    return algorithm;
-}
-
-float phaseCurrent(MotorSingleShuntSamplePhase phase)
-{
-    switch (phase)
-    {
-        case MotorSingleShuntSamplePhase::U: return 2.4f;
-        case MotorSingleShuntSamplePhase::V: return -0.7f;
-        case MotorSingleShuntSamplePhase::W: return -1.7f;
-        default: return 0.0f;
-    }
-}
-
-float sampleForSlot(const MotorSingleShuntSampleSlot& slot)
-{
-    const float current = phaseCurrent(slot.phase);
-    return slot.sign > 0 ? current : -current;
+    return (static_cast<uint16_t>(faults) &
+            static_cast<uint16_t>(expected)) != 0U;
 }
 
 void expectBaseDetail(const MotorConfig& cfg, MotorConfigFaultDetail expected)
@@ -147,27 +113,6 @@ void expectBaseDetail(const MotorConfig& cfg, MotorConfigFaultDetail expected)
     MOTOR_ASSERT_EQ(detail, expected);
 }
 
-void expectInitDiagnosticError(const MotorConfig& cfg,
-                               Result expected_result,
-                               Fault expected_fault,
-                               MotorConfigFaultDetail expected_detail)
-{
-    MotorAPI api;
-    MOTOR_ASSERT_EQ(api.init(cfg), expected_result);
-    MOTOR_ASSERT_EQ(api.getState(), State::ERROR);
-    MOTOR_ASSERT_EQ(api.getFault(), expected_fault);
-    MOTOR_ASSERT_EQ(api.getConfigFaultDetail(), expected_detail);
-
-    Motor_Global_Process_Handler(0);
-
-    MotorMonitorData monitor{};
-    api.getMonitorData(monitor);
-    MOTOR_ASSERT_EQ(monitor.state, State::ERROR);
-    MOTOR_ASSERT_EQ(monitor.fault_code, expected_fault);
-    MOTOR_ASSERT_EQ(monitor.config_fault_detail, expected_detail);
-    MOTOR_ASSERT_EQ(api.deInit(), Result::Ok);
-}
-
 } // namespace
 
 MOTOR_TEST(host_test_runner_starts)
@@ -175,273 +120,232 @@ MOTOR_TEST(host_test_runner_starts)
     MOTOR_ASSERT_TRUE(true);
 }
 
-MOTOR_TEST(single_shunt_build_config_accepts_mode_1)
+MOTOR_TEST(dual_sensor_build_config_accepts_mode_2)
 {
     MotorConfigFaultDetail detail = MotorConfigFaultDetail::NONE;
     MOTOR_ASSERT_EQ(MotorConfigCheck::validateBuildConfig(&detail), Fault::NONE);
     MOTOR_ASSERT_EQ(detail, MotorConfigFaultDetail::NONE);
 }
 
-MOTOR_TEST(single_shunt_base_config_accepts_valid_hal_and_sensor)
+MOTOR_TEST(dual_sensor_base_accepts_uv_mask_and_bus_current)
 {
-    const MotorHAL_t hal = makeSingleShuntHal();
-    const MotorConfig cfg = makeSingleShuntConfig(hal);
+    const MotorHAL_t hal = makeDualHal();
+    const MotorConfig cfg = makeDualConfig(hal);
 
     MotorConfigFaultDetail detail = MotorConfigFaultDetail::NONE;
     MOTOR_ASSERT_EQ(MotorConfigCheck::validateBase(cfg, &detail), Fault::NONE);
     MOTOR_ASSERT_EQ(detail, MotorConfigFaultDetail::NONE);
 }
 
-MOTOR_TEST(single_shunt_base_config_rejects_illegal_combinations)
+MOTOR_TEST(dual_sensor_base_rejects_invalid_masks)
 {
-    MotorHAL_t hal = makeSingleShuntHal();
-    MotorConfig cfg = makeSingleShuntConfig(hal);
+    MotorHAL_t hal = makeDualHal(MOTOR_PHASE_CURRENT_U_VALID);
+    MotorConfig cfg = makeDualConfig(hal);
+    expectBaseDetail(cfg, MotorConfigFaultDetail::PHASE_CURRENT_DUAL_MASK_INVALID);
 
-    cfg.sensor.current_sensor_type = CurrentSensorType::HALL_SENSOR;
-    expectBaseDetail(cfg, MotorConfigFaultDetail::SINGLE_SHUNT_REQUIRES_SHUNT_SENSOR);
+    hal = makeDualHal(MOTOR_PHASE_CURRENT_ALL_VALID);
+    cfg = makeDualConfig(hal);
+    expectBaseDetail(cfg, MotorConfigFaultDetail::PHASE_CURRENT_DUAL_MASK_INVALID);
 
-    cfg = makeSingleShuntConfig(hal);
-    cfg.control.modulation = ModulationMethod::SPWM;
-    expectBaseDetail(cfg, MotorConfigFaultDetail::SINGLE_SHUNT_REQUIRES_SVPWM);
-
-    cfg = makeSingleShuntConfig(hal);
-    cfg.sensor.single_shunt_min_sample_window_s = 100.0e-6f;
-    expectBaseDetail(cfg, MotorConfigFaultDetail::SINGLE_SHUNT_WINDOW_INVALID);
-
-    cfg = makeSingleShuntConfig(hal);
-    hal.read_single_shunt_pair_raw = nullptr;
-    cfg.hal = &hal;
-    expectBaseDetail(cfg, MotorConfigFaultDetail::SINGLE_SHUNT_HAL_INVALID);
-
-    hal = makeSingleShuntHal();
-    hal.apply_current_sample_schedule = nullptr;
-    cfg = makeSingleShuntConfig(hal);
-    expectBaseDetail(cfg, MotorConfigFaultDetail::SINGLE_SHUNT_HAL_INVALID);
-
-    hal = makeSingleShuntHal();
-    hal.phase_current_valid_mask = MOTOR_PHASE_CURRENT_U_VALID;
-    cfg = makeSingleShuntConfig(hal);
-    expectBaseDetail(cfg, MotorConfigFaultDetail::PHASE_CURRENT_SINGLE_SHUNT_MASK_INVALID);
+    hal = makeDualHal(static_cast<uint8_t>(MOTOR_PHASE_CURRENT_U_VALID | 0x80U));
+    cfg = makeDualConfig(hal);
+    expectBaseDetail(cfg, MotorConfigFaultDetail::PHASE_CURRENT_MASK_INVALID);
 }
 
-MOTOR_TEST(single_shunt_build_config_rejects_motorcfg_mismatch)
+MOTOR_TEST(command_direction_maps_api_speed_and_public_telemetry)
 {
-    MotorHAL_t hal = makeSingleShuntHal();
-    hal.phase_current_valid_mask =
-        MOTOR_PHASE_CURRENT_U_VALID | MOTOR_PHASE_CURRENT_V_VALID;
+    const MotorHAL_t hal = makeDualHal();
+    MotorConfig cfg = makeDualConfig(hal);
+    cfg.control.command_direction = -1;
 
-    MotorConfig cfg = makeSingleShuntConfig(hal);
-    cfg.sensor.current_sense_mode = CurrentSenseMode::DUAL_SENSOR;
+    MotorManager manager(cfg);
+    manager.init();
 
-    expectBaseDetail(cfg, MotorConfigFaultDetail::CURRENT_SENSE_MODE_BUILD_MISMATCH);
-}
+    manager.setTargetSpeed(400.0f);
+    MOTOR_ASSERT_NEAR(runtimeSpeedToPhysical(manager.ctx(), manager.ctx().target_rpm),
+                      -400.0f,
+                      1.0e-5f);
 
-MOTOR_TEST(motor_api_init_base_error_enters_tick_diagnostic_error)
-{
-    MotorHAL_t hal = makeSingleShuntHal();
-    hal.phase_current_valid_mask =
-        MOTOR_PHASE_CURRENT_U_VALID | MOTOR_PHASE_CURRENT_V_VALID;
-
-    MotorConfig cfg = makeSingleShuntConfig(hal);
-    cfg.sensor.current_sense_mode = CurrentSenseMode::DUAL_SENSOR;
-
-    expectInitDiagnosticError(cfg,
-                              Result::InvalidParam,
-                              Fault::PARAM_ERROR,
-                              MotorConfigFaultDetail::CURRENT_SENSE_MODE_BUILD_MISMATCH);
-}
-
-MOTOR_TEST(motor_api_init_startup_error_enters_tick_diagnostic_error)
-{
-    const MotorHAL_t hal = makeSingleShuntHal();
-    MotorConfig cfg = makeSingleShuntConfig(hal);
-    cfg.control.startup_target_mode = Mode::DEBUG_HFI_OBSERVER;
-
-    expectInitDiagnosticError(cfg,
-                              Result::NotSupported,
-                              Fault::OBSERVER_UNAVAILABLE,
-                              MotorConfigFaultDetail::FEEDBACK_SINGLE_SHUNT_HFI_UNSUPPORTED);
-}
-
-MOTOR_TEST(motor_api_init_feedback_error_enters_tick_diagnostic_error)
-{
-    const MotorHAL_t hal = makeSingleShuntHal();
-    MotorConfig cfg = makeSingleShuntConfig(hal);
-    cfg.control.startup_target_mode = Mode::VELOCITY_CONTROL;
-    cfg.observer.allow_smo_closed_loop = false;
-
-    expectInitDiagnosticError(cfg,
-                              Result::NotSupported,
-                              Fault::OBSERVER_UNAVAILABLE,
-                              MotorConfigFaultDetail::FEEDBACK_SMO_CLOSED_LOOP_DISABLED);
-}
-
-MOTOR_TEST(single_shunt_reconstructs_all_svpwm_sectors)
-{
-    struct SectorDuty
-    {
-        float u;
-        float v;
-        float w;
-        uint8_t sector;
+    MotorTelemetryChannel channels[] = {
+        MotorTelemetryChannel::TargetRpm,
+        MotorTelemetryChannel::SpeedRpm,
     };
+    float values[2] = {};
+    RuntimeCtx& ctx = manager.ctxMutForTest();
+    ctx.speed_rpm = runtimeSpeedFromPhysical(ctx, -123.0f);
+    MOTOR_ASSERT_EQ(manager.getTelemetryFloats(channels, 2U, values), 2U);
+    MOTOR_ASSERT_NEAR(values[0], 400.0f, 1.0e-5f);
+    MOTOR_ASSERT_NEAR(values[1], 123.0f, 1.0e-5f);
+    MOTOR_ASSERT_NEAR(manager.getSpeed(), 123.0f, 1.0e-5f);
 
-    const SectorDuty cases[] = {
-        {0.70f, 0.50f, 0.30f, 1U},
-        {0.50f, 0.70f, 0.30f, 2U},
-        {0.30f, 0.70f, 0.50f, 3U},
-        {0.30f, 0.50f, 0.70f, 4U},
-        {0.50f, 0.30f, 0.70f, 5U},
-        {0.70f, 0.30f, 0.50f, 6U},
-    };
+    MotorDebugData debug{};
+    manager.getDebugData(debug);
+    MOTOR_ASSERT_NEAR(debug.target_rpm, 400.0f, 1.0e-5f);
 
-    for (const SectorDuty& item : cases)
-    {
-        float u = item.u;
-        float v = item.v;
-        float w = item.w;
-        MotorSingleShuntSamplePlan plan{};
-        MOTOR_ASSERT_TRUE(MotorSingleShunt::buildSamplePlan(u, v, w, 0.95f,
-                                                             1.0e-6f, 10000.0f,
-                                                             plan));
-        MOTOR_ASSERT_EQ(plan.valid, 1U);
-        MOTOR_ASSERT_EQ(plan.sector, item.sector);
-        MOTOR_ASSERT_EQ(plan.first.sign, -1);
-        MOTOR_ASSERT_EQ(plan.second.sign, 1);
-
-        MotorSingleShuntCurrents currents{};
-        MOTOR_ASSERT_TRUE(MotorSingleShunt::reconstruct(plan,
-                                                        sampleForSlot(plan.first),
-                                                        sampleForSlot(plan.second),
-                                                        currents));
-        MOTOR_ASSERT_NEAR(currents.ia, 2.4f, 1.0e-5f);
-        MOTOR_ASSERT_NEAR(currents.ib, -0.7f, 1.0e-5f);
-        MOTOR_ASSERT_NEAR(currents.ic, -1.7f, 1.0e-5f);
-        MOTOR_ASSERT_NEAR(currents.ia + currents.ib + currents.ic, 0.0f, 1.0e-5f);
-    }
+    manager.setTargetSpeed(-400.0f);
+    MOTOR_ASSERT_NEAR(runtimeSpeedToPhysical(manager.ctx(), manager.ctx().target_rpm),
+                      400.0f,
+                      1.0e-5f);
+    MOTOR_ASSERT_EQ(manager.getTelemetryFloats(channels, 1U, values), 1U);
+    MOTOR_ASSERT_NEAR(values[0], -400.0f, 1.0e-5f);
 }
 
-MOTOR_TEST(single_shunt_plan_separates_tight_active_windows)
+MOTOR_TEST(command_direction_maps_velocity_setpoint)
 {
-    float u = 0.501f;
-    float v = 0.500f;
-    float w = 0.499f;
-    MotorSingleShuntSamplePlan plan{};
+    const MotorHAL_t hal = makeDualHal();
+    MotorConfig cfg = makeDualConfig(hal);
+    cfg.control.command_direction = -1;
 
-    MOTOR_ASSERT_TRUE(MotorSingleShunt::buildSamplePlan(u, v, w, 0.95f,
-                                                        1.0e-6f, 10000.0f,
-                                                        plan));
-    MOTOR_ASSERT_EQ(plan.valid, 1U);
-    MOTOR_ASSERT_TRUE(plan.second.trigger_duty > plan.first.trigger_duty);
-    MOTOR_ASSERT_TRUE((u - v) >= 0.0099f);
-    MOTOR_ASSERT_TRUE((v - w) >= 0.0099f);
+    MotorManager manager(cfg);
+    manager.init();
+
+    MotionSetpoint sp{};
+    sp.mode = Mode::VELOCITY_CONTROL;
+    sp.vel_ff = 250.0f;
+    manager.writeSetpoint(sp);
+    MOTOR_ASSERT_NEAR(runtimeSpeedToPhysical(manager.ctx(), manager.ctx().target_rpm),
+                      -250.0f,
+                      1.0e-5f);
+
+    sp.vel_ff = -250.0f;
+    manager.writeSetpoint(sp);
+    MOTOR_ASSERT_NEAR(runtimeSpeedToPhysical(manager.ctx(), manager.ctx().target_rpm),
+                      250.0f,
+                      1.0e-5f);
 }
 
-MOTOR_TEST(single_shunt_exports_hardware_schedule_without_phase_semantics)
+MOTOR_TEST(command_direction_rejects_invalid_values)
 {
-    float u = 0.70f;
-    float v = 0.50f;
-    float w = 0.30f;
-    MotorSingleShuntSamplePlan plan{};
-
-    MOTOR_ASSERT_TRUE(MotorSingleShunt::buildSamplePlan(u, v, w, 0.95f,
-                                                        1.0e-6f, 10000.0f,
-                                                        plan));
-
-    const MotorCurrentSampleSchedule schedule =
-        MotorSingleShunt::toCurrentSampleSchedule(plan);
-    MOTOR_ASSERT_EQ(schedule.enabled, 1U);
-    MOTOR_ASSERT_EQ(schedule.sample_count, 2U);
-    MOTOR_ASSERT_NEAR(schedule.trigger_duty[0], plan.first.trigger_duty, 1.0e-6f);
-    MOTOR_ASSERT_NEAR(schedule.trigger_duty[1], plan.second.trigger_duty, 1.0e-6f);
+    const MotorHAL_t hal = makeDualHal();
+    MotorConfig cfg = makeDualConfig(hal);
+    cfg.control.command_direction = 0;
+    expectBaseDetail(cfg, MotorConfigFaultDetail::CONTROL_DIRECTION_INVALID);
 }
 
-MOTOR_TEST(single_shunt_feedback_allows_sensor_and_if_smo)
+MOTOR_TEST(smo_angle_branch_uses_internal_direction)
 {
-    const MotorHAL_t hal = makeSingleShuntHal();
-    MotorConfig cfg = makeSingleShuntConfig(hal);
-    SensorInterface_t sensor = makeSensor();
-
-    cfg.position.rotor_sensor = &sensor;
-    cfg.position.rotor_feedback.feedback_class = AngleFeedbackClass::HIGH_RES_ENCODER;
-    cfg.default_run_policy.startup_source = StartupSource::SENSOR;
-    cfg.default_run_policy.steady_source = SteadyAngleSource::SENSOR;
-
-    MotorConfigFaultDetail detail = MotorConfigFaultDetail::NONE;
-    MOTOR_ASSERT_EQ(MotorConfigCheck::validateFeedback(makeHardware(cfg),
-                                                       makeAlgorithm(cfg),
-                                                       cfg.default_run_policy,
-                                                       &detail),
-                    Fault::NONE);
-
-    cfg = makeSingleShuntConfig(hal);
-    detail = MotorConfigFaultDetail::NONE;
-    MOTOR_ASSERT_EQ(MotorConfigCheck::validateFeedback(makeHardware(cfg),
-                                                       makeAlgorithm(cfg),
-                                                       cfg.default_run_policy,
-                                                       &detail),
-                    Fault::NONE);
+    MOTOR_ASSERT_NEAR(runtimeCorrectSmoAngleForDirection(0.25f, 1),
+                      0.25f + PI,
+                      1.0e-6f);
+    MOTOR_ASSERT_NEAR(runtimeCorrectSmoAngleForDirection(5.75f, 1),
+                      5.75f + PI - TWO_PI,
+                      1.0e-6f);
+    MOTOR_ASSERT_NEAR(runtimeCorrectSmoAngleForDirection(0.25f, -1),
+                      0.25f,
+                      1.0e-6f);
 }
 
-MOTOR_TEST(single_shunt_feedback_rejects_hfi_sources)
+MOTOR_TEST(dual_sensor_kcl_reconstructs_missing_w_from_uv)
 {
-    const MotorHAL_t hal = makeSingleShuntHal();
-    MotorConfig cfg = makeSingleShuntConfig(hal);
+    g_raw_u = 2U;
+    g_raw_v = 3U;
+    g_raw_w = 99U;
+    g_raw_bus = 4U;
+    g_hw_flags = MOTOR_HAL_HW_FAULT_NONE;
 
-    MotorRunPolicy policy{};
-    policy.startup_source = StartupSource::HFI;
-    policy.steady_source = SteadyAngleSource::SMO;
+    const MotorHAL_t hal = makeDualHal();
+    MotorConfig cfg = makeDualConfig(hal);
+    cfg.limit.max_phase_current_a = 1000.0f;
+    cfg.limit.max_bus_current_a = 1000.0f;
 
-    MotorConfigFaultDetail detail = MotorConfigFaultDetail::NONE;
-    MOTOR_ASSERT_EQ(MotorConfigCheck::validateFeedback(makeHardware(cfg),
-                                                       makeAlgorithm(cfg),
-                                                       policy,
-                                                       &detail),
-                    Fault::OBSERVER_UNAVAILABLE);
-    MOTOR_ASSERT_EQ(detail, MotorConfigFaultDetail::FEEDBACK_SINGLE_SHUNT_HFI_UNSUPPORTED);
+    MotorManager manager(cfg);
+    manager.init();
+    manager.setState(State::STOP);
+    manager.tick();
 
-    policy.startup_source = StartupSource::IF;
-    policy.steady_source = SteadyAngleSource::HFI;
-    detail = MotorConfigFaultDetail::NONE;
-    MOTOR_ASSERT_EQ(MotorConfigCheck::validateFeedback(makeHardware(cfg),
-                                                       makeAlgorithm(cfg),
-                                                       policy,
-                                                       &detail),
-                    Fault::OBSERVER_UNAVAILABLE);
-    MOTOR_ASSERT_EQ(detail, MotorConfigFaultDetail::FEEDBACK_SINGLE_SHUNT_HFI_UNSUPPORTED);
+    MotorMonitorData monitor{};
+    manager.getMonitorData(monitor);
+    MOTOR_ASSERT_NEAR(monitor.i_a, 2.0f, 1.0e-5f);
+    MOTOR_ASSERT_NEAR(monitor.i_b, 3.0f, 1.0e-5f);
+    MOTOR_ASSERT_NEAR(monitor.i_c, -5.0f, 1.0e-5f);
+    MOTOR_ASSERT_NEAR(monitor.i_a + monitor.i_b + monitor.i_c, 0.0f, 1.0e-5f);
 }
 
-MOTOR_TEST(single_shunt_rejects_hfi_debug_entries)
+MOTOR_TEST(phase_overcurrent_reports_phase_detail)
 {
-    const MotorHAL_t hal = makeSingleShuntHal();
-    MotorConfig cfg = makeSingleShuntConfig(hal);
+    MotorLimitParam limits{};
+    limits.max_phase_current_a = 10.0f;
+    limits.max_bus_current_a = 10.0f;
+    limits.over_voltage_v = 30.0f;
+    limits.under_voltage_v = 0.0f;
 
-    MotorConfigFaultDetail detail = MotorConfigFaultDetail::NONE;
-    cfg.control.startup_target_mode = Mode::DEBUG_HFI_OBSERVER;
-    MOTOR_ASSERT_EQ(MotorConfigCheck::validateStartupTargetMode(cfg, &detail),
-                    Fault::OBSERVER_UNAVAILABLE);
-    MOTOR_ASSERT_EQ(detail, MotorConfigFaultDetail::FEEDBACK_SINGLE_SHUNT_HFI_UNSUPPORTED);
+    MotorSensorParam sensor{};
+    sensor.has_bus_current = true;
+    const float temp[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+    Fault fault = Fault::NONE;
+    MotorRuntimeFaultDetail detail = MotorRuntimeFaultDetail::NONE;
 
-    cfg.control.startup_target_mode = Mode::DEBUG_IF_HFI_OBSERVER;
-    detail = MotorConfigFaultDetail::NONE;
-    MOTOR_ASSERT_EQ(MotorConfigCheck::validateStartupTargetMode(cfg, &detail),
-                    Fault::OBSERVER_UNAVAILABLE);
-    MOTOR_ASSERT_EQ(detail, MotorConfigFaultDetail::FEEDBACK_SINGLE_SHUNT_HFI_UNSUPPORTED);
+    MotorRuntimeMonitor monitor;
+    monitor.check(limits, sensor, 11.0f, 0.0f, 0.0f, 0.0f,
+                  12.0f, temp, State::RUN, &fault, &detail);
 
-    MOTOR_ASSERT_EQ(MotorCommandGuard::validateModeSelection(cfg, Mode::DEBUG_HFI_OBSERVER),
-                    Result::NotSupported);
-    MOTOR_ASSERT_EQ(MotorCommandGuard::validateModeSelection(cfg, Mode::DEBUG_IF_HFI_OBSERVER),
-                    Result::NotSupported);
+    MOTOR_ASSERT_TRUE(hasFault(fault, Fault::OVERCURRENT));
+    MOTOR_ASSERT_EQ(detail, MotorRuntimeFaultDetail::SOFTWARE_PHASE_OVERCURRENT);
 }
 
-MOTOR_TEST(single_shunt_fault_details_have_strings)
+MOTOR_TEST(bus_current_disabled_ignores_bus_overcurrent)
 {
-    MOTOR_ASSERT_TRUE(std::strcmp(MotorConfigFaultDetailToString(
-                                      MotorConfigFaultDetail::SINGLE_SHUNT_HAL_INVALID),
-                                  "Single-shunt HAL callbacks invalid") == 0);
-    MOTOR_ASSERT_TRUE(std::strcmp(MotorConfigFaultDetailToString(
-                                      MotorConfigFaultDetail::FEEDBACK_SINGLE_SHUNT_HFI_UNSUPPORTED),
-                                  "Single-shunt sampling does not support HFI") == 0);
+    MotorLimitParam limits{};
+    limits.max_phase_current_a = 10.0f;
+    limits.max_bus_current_a = 1.0f;
+    limits.over_voltage_v = 30.0f;
+    limits.under_voltage_v = 0.0f;
+
+    MotorSensorParam sensor{};
+    sensor.has_bus_current = false;
+    const float temp[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+    Fault fault = Fault::NONE;
+    MotorRuntimeFaultDetail detail = MotorRuntimeFaultDetail::NONE;
+
+    MotorRuntimeMonitor monitor;
+    monitor.check(limits, sensor, 0.0f, 0.0f, 0.0f, 50.0f,
+                  12.0f, temp, State::RUN, &fault, &detail);
+
+    MOTOR_ASSERT_EQ(fault, Fault::NONE);
+    MOTOR_ASSERT_EQ(detail, MotorRuntimeFaultDetail::NONE);
+}
+
+MOTOR_TEST(bus_current_enabled_reports_bus_detail)
+{
+    MotorLimitParam limits{};
+    limits.max_phase_current_a = 10.0f;
+    limits.max_bus_current_a = 1.0f;
+    limits.over_voltage_v = 30.0f;
+    limits.under_voltage_v = 0.0f;
+
+    MotorSensorParam sensor{};
+    sensor.has_bus_current = true;
+    const float temp[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+    Fault fault = Fault::NONE;
+    MotorRuntimeFaultDetail detail = MotorRuntimeFaultDetail::NONE;
+
+    MotorRuntimeMonitor monitor;
+    monitor.check(limits, sensor, 0.0f, 0.0f, 0.0f, 2.0f,
+                  12.0f, temp, State::RUN, &fault, &detail);
+
+    MOTOR_ASSERT_TRUE(hasFault(fault, Fault::OVERCURRENT));
+    MOTOR_ASSERT_EQ(detail, MotorRuntimeFaultDetail::SOFTWARE_BUS_OVERCURRENT);
+}
+
+MOTOR_TEST(hardware_bus_comparator_fault_latches_overcurrent_detail)
+{
+    g_raw_u = 0U;
+    g_raw_v = 0U;
+    g_raw_w = 0U;
+    g_raw_bus = 0U;
+    g_hw_flags = MOTOR_HAL_HW_FAULT_TIM1_BREAK;
+
+    const MotorHAL_t hal = makeDualHal();
+    MotorConfig cfg = makeDualConfig(hal);
+
+    MotorManager manager(cfg);
+    manager.init();
+    manager.setState(State::STOP);
+    manager.tick();
+
+    MOTOR_ASSERT_TRUE(hasFault(manager.fault(), Fault::OVERCURRENT));
+    MOTOR_ASSERT_EQ(manager.runtimeFaultDetail(),
+                    MotorRuntimeFaultDetail::HARDWARE_BUS_OVERCURRENT_COMPARATOR);
 }
 
 int main()

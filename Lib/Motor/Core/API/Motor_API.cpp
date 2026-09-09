@@ -10,16 +10,15 @@
  * 安全设计原则:
  *   - 所有 public API 先做空指针和参数校验, 再委托 MotorManager
  *   - 模式切换 (selectMode/debugXxx) 经过 checkSafeModeChange 安全把关
- *   - 调试 API 受 debug_locked_ 和 ENABLE_DANGEROUS_TEST_API 双重保护
+ *   - 调试 API 受 debug_locked_ 和对应 BuildCfg 子开关双重保护
  */
 
 #include "Motor_API.h"
 
 #include "../Feature/Motor_FeatureRegistry.h"
 #include "../Manager/Motor_Manager.h"
-#include "../Debug/Motor_OzoneTuning.h"
-#include "../../Safety/Basic/Motor_CommandGuard.h"
-#include "../../Safety/Basic/Motor_ConfigCheck.h"
+#include "../Safety/Motor_CommandGuard.h"
+#include "../Safety/Motor_ConfigCheck.h"
 #include "../FSM/Motor_FSM.h"
 #include "BuildCfg/Platform_MotorBuildConfig.h"
 
@@ -81,22 +80,9 @@ uint16_t diagnosticReadTemp(uint8_t)
     return 0U;
 }
 
-bool diagnosticReadSingleShuntPair(uint16_t* raw_first, uint16_t* raw_second)
-{
-    if (raw_first != nullptr) *raw_first = 0U;
-    if (raw_second != nullptr) *raw_second = 0U;
-    return false;
-}
-
-void diagnosticApplyCurrentSampleSchedule(const MotorCurrentSampleSchedule*)
-{
-}
-
 CurrentSenseMode buildCurrentSenseMode()
 {
-#if MOTOR_BUILD_CURRENT_SENSE_MODE == 1
-    return CurrentSenseMode::SINGLE_SHUNT;
-#elif MOTOR_BUILD_CURRENT_SENSE_MODE == 3
+#if MOTOR_BUILD_CURRENT_SENSE_MODE == 3
     return CurrentSenseMode::TRIPLE_SENSOR;
 #else
     return CurrentSenseMode::DUAL_SENSOR;
@@ -105,9 +91,7 @@ CurrentSenseMode buildCurrentSenseMode()
 
 uint8_t diagnosticPhaseCurrentMask()
 {
-#if MOTOR_BUILD_CURRENT_SENSE_MODE == 1
-    return 0U;
-#elif MOTOR_BUILD_CURRENT_SENSE_MODE == 3
+#if MOTOR_BUILD_CURRENT_SENSE_MODE == 3
     return MOTOR_PHASE_CURRENT_ALL_VALID;
 #else
     return static_cast<uint8_t>(MOTOR_PHASE_CURRENT_U_VALID |
@@ -137,9 +121,7 @@ const MotorHAL_t* diagnosticHal()
         nullptr,
         nullptr,
         nullptr,
-        0U,
-        diagnosticReadSingleShuntPair,
-        diagnosticApplyCurrentSampleSchedule};
+        0U};
     return &hal;
 }
 
@@ -378,9 +360,6 @@ Result MotorAPI::init(const MotorConfig& cfg)
         base_faulted ? makeTickSafeDiagnosticConfig(cfg) : cfg;
     MotorManager* const mgr = new (managerStorageAt(id_)) MotorManager(manager_config);
     g_motor_pool[id_] = mgr;
-#if LIB_MOTOR_ENABLE_OZONE_TUNING
-    Motor_OzoneTuning_LoadFromConfig(static_cast<uint8_t>(id_), manager_config);
-#endif
     mgr->init();
     mgr->setConfigFaultDetail(init_detail);
 
@@ -712,19 +691,6 @@ Result MotorAPI::setControlMethod(ControlMethod method)
 }
 
 /*
- * setDragCurrent — 设置 I/F 强拖电流幅值
- */
-#if LIB_MOTOR_ENABLE_IF_STARTUP
-Result MotorAPI::setDragCurrent(float A)
-{
-    if (id_ < 0 || g_motor_pool[id_] == nullptr) return Result::InvalidHandle;
-    if (isDebugOrCalibApiLocked(g_motor_pool[id_])) return Result::InvalidState;
-    g_motor_pool[id_]->setDragCurrent(A);
-    return Result::Ok;
-}
-#endif
-
-/*
  * setModulation — 设置调制方式 (SVPWM/SPWM)
  *
  * 当前版本固定 SVPWM, 预留接口
@@ -791,6 +757,20 @@ void MotorAPI::getDebugData(MotorDebugData& out_data) const
 }
 
 /*
+ * getTelemetryFloats — 按调用方指定通道导出 float 遥测值
+ */
+uint8_t MotorAPI::getTelemetryFloats(const MotorTelemetryChannel* channels,
+                                     uint8_t channel_count,
+                                     float* out_values) const
+{
+    if (id_ < 0 || g_motor_pool[id_] == nullptr)
+    {
+        return 0U;
+    }
+    return g_motor_pool[id_]->getTelemetryFloats(channels, channel_count, out_values);
+}
+
+/*
  * getState — 获取当前顶层状态 (INIT/ADC_CAL/STOP/RUN/STOPPING/ERROR)
  */
 State MotorAPI::getState() const
@@ -837,7 +817,7 @@ uint8_t MotorAPI::getStallRetryCounter() const
 #endif
 }
 
-/* [P2] SMO 收敛后辨识得到的 Ke (写 cfg.physical.ke_v_per_rad_s_identified) */
+/* [P2] 读取 Ke 辨识缓存；当前 SMO 未自动写入有效 Ke。 */
 float MotorAPI::getKEstimated() const
 {
     if (id_ < 0 || g_motor_pool[id_] == nullptr) return 0.0f;
@@ -855,7 +835,7 @@ bool MotorAPI::isRLIdentifyDone() const
 #endif
 }
 
-/* [P2] Ke 辨识完成轮询 (由 startKEstimation 触发) */
+/* [P2] Ke 辨识完成轮询；当前实现未接入有效 Ke 写入源。 */
 bool MotorAPI::isKEstimationDone() const
 {
     if (id_ < 0 || g_motor_pool[id_] == nullptr) return false;
@@ -873,7 +853,7 @@ bool MotorAPI::isFlyingStartDone() const
 #endif
 }
 
-/* [P2] startKEstimation 实现 (占位: 真正落地在 D 组 MotorKEstimationFSM 中) */
+/* [P2] startKEstimation 预留入口；真正 Ke 辨识需后续 Identify 层实现。 */
 Result MotorAPI::startKEstimation()
 {
 #if LIB_MOTOR_ENABLE_AUTO_IDENTIFY
@@ -989,11 +969,11 @@ Result MotorAPI::setEnergyBudget(const MotorEnergyBudget& budget)
 }
 
 // ================================================================
-//  危险调试 API (需 ENABLE_DANGEROUS_TEST_API 宏 + debug_locked=false)
+//  调试 API (需对应 DEBUG_* BuildCfg 子开关 + debug_locked=false)
 //  这些 API 绕过正常的安全检查, 仅用于调试和测试
 // ================================================================
-#ifdef ENABLE_DANGEROUS_TEST_API
 
+#if LIB_MOTOR_ENABLE_DEBUG_PWM_MANUAL
 /*
  * debugPWMManual — 手动 PWM 开环输出
  *
@@ -1009,11 +989,13 @@ Result MotorAPI::debugPWMManual(float u, float v, float w)
     if (r != Result::Ok) return r;
 
     g_motor_pool[id_]->setMode(Mode::DEBUG_PWM_MANUAL);
-    g_motor_pool[id_]->requestStart();
     g_motor_pool[id_]->setRawPWM(u, v, w);
+    g_motor_pool[id_]->requestStart();
     return Result::Ok;
 }
+#endif
 
+#if LIB_MOTOR_ENABLE_DEBUG_CURRENT_LOCK
 /*
  * debugCurrentLock — 电流锁存调试
  *
@@ -1028,36 +1010,14 @@ Result MotorAPI::debugCurrentLock(float i_d, float i_q)
     if (r != Result::Ok) return r;
 
     g_motor_pool[id_]->setMode(Mode::DEBUG_CURRENT_LOCK);
-    g_motor_pool[id_]->requestStart();
     g_motor_pool[id_]->setTargetId(i_d);
     g_motor_pool[id_]->setTargetTorque(i_q);
-    return Result::Ok;
-}
-
-/*
- * debugIFControl — IF 强拖调试 (简化参数)
- *
- * 以 IF (流频比) 方式开环拖动电机
- */
-#if LIB_MOTOR_ENABLE_IF_STARTUP
-Result MotorAPI::debugIFControl(float target_rpm, float id_amp, float iq_amp, float ramp_time_s)
-{
-    if (debug_locked_) return Result::InvalidState;
-    if (id_ < 0 || g_motor_pool[id_] == nullptr) return Result::InvalidHandle;
-
-    Result r = checkSafeModeChange(Mode::DEBUG_IF_DRAG);
-    if (r != Result::Ok) return r;
-
-    g_motor_pool[id_]->setMode(Mode::DEBUG_IF_DRAG);
     g_motor_pool[id_]->requestStart();
-    g_motor_pool[id_]->clearDebugStartupProfiles();
-    g_motor_pool[id_]->setDebugRampTime(ramp_time_s);
-    g_motor_pool[id_]->setTargetSpeed(target_rpm);
-    g_motor_pool[id_]->setTargetId(id_amp);
-    g_motor_pool[id_]->setTargetTorque(iq_amp);
     return Result::Ok;
 }
+#endif
 
+#if LIB_MOTOR_ENABLE_DEBUG_IF_CONTROL
 /*
  * debugIFControl — IF 强拖调试 (分段启动曲线)
  *
@@ -1067,58 +1027,68 @@ Result MotorAPI::debugIFControl(const MotorIFStartupProfile& profile)
 {
     if (debug_locked_) return Result::InvalidState;
     if (id_ < 0 || g_motor_pool[id_] == nullptr) return Result::InvalidHandle;
-    if (profile.phases == nullptr || profile.phase_count == 0U) return Result::InvalidParam;
+    if (!MotorConfigCheck::validIFStartupProfile(&profile)) return Result::InvalidParam;
 
     Result r = checkSafeModeChange(Mode::DEBUG_IF_DRAG);
     if (r != Result::Ok) return r;
 
     g_motor_pool[id_]->setMode(Mode::DEBUG_IF_DRAG);
+    if (!g_motor_pool[id_]->setDebugIFStartupProfile(&profile))
+    {
+        return Result::InvalidParam;
+    }
     g_motor_pool[id_]->requestStart();
-    g_motor_pool[id_]->setDebugIFStartupProfile(&profile);
-    return Result::Ok;
-}
-
-#if LIB_MOTOR_ENABLE_SMO
-Result MotorAPI::debugIFSMOObserver(const MotorIFStartupProfile& profile)
-{
-    if (debug_locked_) return Result::InvalidState;
-    if (id_ < 0 || g_motor_pool[id_] == nullptr) return Result::InvalidHandle;
-    if (profile.phases == nullptr || profile.phase_count == 0U) return Result::InvalidParam;
-
-    Result r = checkSafeModeChange(Mode::DEBUG_IF_SMO_OBSERVER);
-    if (r != Result::Ok) return r;
-
-    g_motor_pool[id_]->setMode(Mode::DEBUG_IF_SMO_OBSERVER);
-    g_motor_pool[id_]->requestStart();
-    g_motor_pool[id_]->setDebugIFStartupProfile(&profile);
     return Result::Ok;
 }
 #endif
 
-#if LIB_MOTOR_ENABLE_HFI
+#if LIB_MOTOR_ENABLE_DEBUG_IF_SMO_OBSERVER
+Result MotorAPI::debugIFSMOObserver(const MotorIFStartupProfile& profile)
+{
+    if (debug_locked_) return Result::InvalidState;
+    if (id_ < 0 || g_motor_pool[id_] == nullptr) return Result::InvalidHandle;
+    if (!MotorConfigCheck::validIFStartupProfile(&profile)) return Result::InvalidParam;
+
+    Result r = checkSafeModeChange(Mode::DEBUG_IF_SMO_OBSERVER);
+    if (r != Result::Ok) return r;
+
+    r = g_motor_pool[id_]->validateModeSelection(Mode::DEBUG_IF_SMO_OBSERVER);
+    if (r != Result::Ok) return r;
+
+    g_motor_pool[id_]->setMode(Mode::DEBUG_IF_SMO_OBSERVER);
+    if (!g_motor_pool[id_]->setDebugIFStartupProfile(&profile))
+    {
+        return Result::InvalidParam;
+    }
+    g_motor_pool[id_]->requestStart();
+    return Result::Ok;
+}
+#endif
+
+#if LIB_MOTOR_ENABLE_DEBUG_IF_HFI_OBSERVER
 Result MotorAPI::debugIFHFIObserver(const MotorIFStartupProfile& profile)
 {
     if (debug_locked_) return Result::InvalidState;
     if (id_ < 0 || g_motor_pool[id_] == nullptr) return Result::InvalidHandle;
-    if (profile.phases == nullptr || profile.phase_count == 0U) return Result::InvalidParam;
+    if (!MotorConfigCheck::validIFStartupProfile(&profile)) return Result::InvalidParam;
 
     Result r = checkSafeModeChange(Mode::DEBUG_IF_HFI_OBSERVER);
     if (r != Result::Ok) return r;
 
     g_motor_pool[id_]->setMode(Mode::DEBUG_IF_HFI_OBSERVER);
+    if (!g_motor_pool[id_]->setDebugIFStartupProfile(&profile))
+    {
+        return Result::InvalidParam;
+    }
     g_motor_pool[id_]->requestStart();
-    g_motor_pool[id_]->setDebugIFStartupProfile(&profile);
     return Result::Ok;
 }
 #endif
-#endif
 
 /*
- * debugVFControl — VF 调试 (简化参数)
- *
- * 以 VF (压频比) 方式开环拖动电机
+ * debugHFIObserver — HFI 注入/解调调试
  */
-#if LIB_MOTOR_ENABLE_HFI
+#if LIB_MOTOR_ENABLE_DEBUG_HFI_OBSERVER
 Result MotorAPI::debugHFIObserver()
 {
     if (debug_locked_) return Result::InvalidState;
@@ -1133,6 +1103,12 @@ Result MotorAPI::debugHFIObserver()
 }
 #endif
 
+/*
+ * debugVFControl — VF 调试 (简化参数)
+ *
+ * 以 VF (压频比) 方式开环拖动电机
+ */
+#if LIB_MOTOR_ENABLE_DEBUG_VF_CONTROL
 Result MotorAPI::debugVFControl(float duty, float speed_rpm, float ramp_time_s)
 {
     if (debug_locked_) return Result::InvalidState;
@@ -1142,11 +1118,11 @@ Result MotorAPI::debugVFControl(float duty, float speed_rpm, float ramp_time_s)
     if (r != Result::Ok) return r;
 
     g_motor_pool[id_]->setMode(Mode::DEBUG_VF_DRAG);
-    g_motor_pool[id_]->requestStart();
     g_motor_pool[id_]->clearDebugStartupProfiles();
     g_motor_pool[id_]->setDebugRampTime(ramp_time_s);
     g_motor_pool[id_]->setVFDutyBias(duty);
     g_motor_pool[id_]->setTargetSpeed(speed_rpm);
+    g_motor_pool[id_]->requestStart();
     return Result::Ok;
 }
 
@@ -1163,11 +1139,13 @@ Result MotorAPI::debugVFControl(const MotorVFStartupProfile& profile)
     if (r != Result::Ok) return r;
 
     g_motor_pool[id_]->setMode(Mode::DEBUG_VF_DRAG);
+    if (!g_motor_pool[id_]->setDebugVFStartupProfile(&profile))
+    {
+        return Result::InvalidParam;
+    }
     g_motor_pool[id_]->requestStart();
-    g_motor_pool[id_]->setDebugVFStartupProfile(&profile);
     return Result::Ok;
 }
-
 #endif
 
 /*
@@ -1259,6 +1237,18 @@ extern "C" void Motor_Global_Process_Handler(int motor_id)
         if (mgr != nullptr)                    // 电机未创建时跳过, 不执行任何操作
         {
             mgr->tick();                       // 执行一次完整控制周期 (传感器→FSM→控制算法→PWM)
+        }
+    }
+}
+
+extern "C" void Motor_Global_ServiceSlow(int motor_id)
+{
+    if (motor_id >= 0 && motor_id < MOTOR_MAX_INSTANCES)
+    {
+        Lib_Motor::MotorManager* mgr = Lib_Motor::g_motor_pool[motor_id];
+        if (mgr != nullptr)
+        {
+            mgr->serviceSlowMonitor();
         }
     }
 }

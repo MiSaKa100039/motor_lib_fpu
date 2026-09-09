@@ -1,6 +1,6 @@
 #include "Motor_FixedNumeric.h"
 
-#include "../../Common/Math/FocMath.h"
+#include "../../Control/Utils/FocMath.h"
 
 #include <cmath>
 
@@ -98,86 +98,27 @@ phase_u32_t phaseFromRadians(float radians)
     {
         return 0U;
     }
-    float wrapped = std::fmod(radians, TWO_PI);
-    if (wrapped < 0.0f)
+    float wrapped = radians;
+    if (wrapped >= TWO_PI || wrapped <= -TWO_PI)
+    {
+        const int turns = static_cast<int>(wrapped * (1.0f / TWO_PI));
+        wrapped -= static_cast<float>(turns) * TWO_PI;
+    }
+    while (wrapped >= TWO_PI)
+    {
+        wrapped -= TWO_PI;
+    }
+    while (wrapped < 0.0f)
     {
         wrapped += TWO_PI;
     }
-    const double phase = static_cast<double>(wrapped) * (4294967296.0 / static_cast<double>(TWO_PI));
+    const float phase = wrapped * (4294967296.0f / TWO_PI);
     return static_cast<phase_u32_t>(phase);
 }
 
 SinCos sinCos(phase_u32_t phase)
 {
     return SinCos{sineFromPhase(phase), sineFromPhase(phase + 0x40000000UL)};
-}
-
-void FixedPiController::configure(float kp,
-                                  float ki,
-                                  float inputBase,
-                                  float outputBase,
-                                  float dt,
-                                  float outputLimit,
-                                  bool resetIntegrator)
-{
-    if (!(inputBase > 0.0f) || !(outputBase > 0.0f) || !(dt > 0.0f))
-    {
-        kpQ15_ = 0;
-        kiPerTickQ15_ = 0;
-        outputLimitQ15_ = 0;
-        integratorQ30_ = 0;
-        return;
-    }
-
-    kpQ15_ = fromNormalized((kp * inputBase) / outputBase);
-    kiPerTickQ15_ = fromNormalized((ki * dt * inputBase) / outputBase);
-    outputLimitQ15_ = absoluteQ15(fromPhysical(outputLimit, outputBase));
-
-    const std::int32_t limitQ30 = static_cast<std::int32_t>(outputLimitQ15_) << 15U;
-    if (resetIntegrator)
-    {
-        integratorQ30_ = 0;
-    }
-    else
-    {
-        integratorQ30_ = clamp32(integratorQ30_, -limitQ30, limitQ30);
-    }
-}
-
-q15_t FixedPiController::update(q15_t error, bool holdIntegral)
-{
-    const std::int32_t proportionalQ30 = static_cast<std::int32_t>(kpQ15_) * error;
-    const std::int32_t limitQ30 = static_cast<std::int32_t>(outputLimitQ15_) << 15U;
-    if (!holdIntegral)
-    {
-        integratorQ30_ = clamp32(integratorQ30_ + static_cast<std::int32_t>(kiPerTickQ15_) * error,
-                                 -limitQ30,
-                                 limitQ30);
-    }
-    const std::int32_t output = (proportionalQ30 + integratorQ30_) >> 15U;
-    return saturateQ15(clamp32(output, -outputLimitQ15_, outputLimitQ15_));
-}
-
-void FixedPiController::reset()
-{
-    integratorQ30_ = 0;
-}
-
-void FixedPiController::decayIntegral(float factor)
-{
-    if (!std::isfinite(factor))
-    {
-        return;
-    }
-    if (factor < 0.0f)
-    {
-        factor = 0.0f;
-    }
-    else if (factor > 1.0f)
-    {
-        factor = 1.0f;
-    }
-    integratorQ30_ = static_cast<std::int32_t>(static_cast<float>(integratorQ30_) * factor);
 }
 
 } // namespace FixedNumeric

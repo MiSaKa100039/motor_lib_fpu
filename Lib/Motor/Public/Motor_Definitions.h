@@ -271,12 +271,10 @@ enum class StopMode : uint8_t
 /* ============================================================
  * RunPhase — RUN 状态的子阶段
  *
- * 无感启动流程:
- *   ALIGNMENT → FORCE_DRAG → SMO_ONLY (速度过阈值)
- *   SMO_ONLY → FORCE_DRAG               (速度回落, 有迟滞)
+ * 无感 IF 启动流程:
+ *   FORCE_DRAG 内依次执行 profile 的 ALIGNMENT/RAMP → SMO_ONLY
  *
- * 有感流程:
- *   ALIGNMENT → SENSOR_ONLY
+ * ALIGNMENT 运行阶段保留给辨识等非 IF 流程，IF 对齐不再单独占用该阶段。
  *
  * 调试流程:
  *   RUN_DIRECT (跳过所有启动阶段)
@@ -288,8 +286,8 @@ enum class RunPhase : uint8_t
     RUN_DIRECT,         // 调试: 跳过启动, 直接运行
 
     /* --- 无感启动链 --- */
-    ALIGNMENT,          // 预对准: 注入固定角度电流, 锁转子到已知位置
-    FORCE_DRAG,         // I/F 或 V/F 开环强拖, 角度发生器加速
+    ALIGNMENT,          // 非 IF 流程保留的固定角度阶段
+    FORCE_DRAG,         // I/F profile 对齐与开环拖动
     SMO_ONLY,           // 滑模观测器闭环 (中高速)
     FLYING_START,       // [P2] 顺逆风启动: phase voltage PLL 重构角度 (LIB_MOTOR_ENABLE_FLYING_START)
 
@@ -321,7 +319,7 @@ enum class RunPhase : uint8_t
 enum class Fault : uint16_t
 {
     NONE         = 0x0000,  // 无故障
-    OVERCURRENT  = 0x0001,  // 过流 (Bit0): max(Ia,Ib,Ic) > limit.max_current_a
+    OVERCURRENT  = 0x0001,  // 过流 (Bit0): 相线/母线软件过流或母线比较器硬件过流
     OVERVOLT     = 0x0002,  // 过压 (Bit1): v_bus > limit.over_voltage_v
     STALL        = 0x0004,  // 堵转 (Bit2): 反电动势过低或电流长期饱和
     SENSOR_LOSS  = 0x0008,  // 传感器丢失 (Bit3): 编码器/I2C 通信异常
@@ -339,6 +337,16 @@ enum class Fault : uint16_t
     OVERSPEED            = 0x8000,// 超速 (Bit15): |ω| > max_speed_rpm × overspeed_factor
 };
 
+enum class MotorRuntimeFaultDetail : uint16_t
+{
+    NONE = 0x0000,
+    SOFTWARE_PHASE_OVERCURRENT = 0x0101,
+    SOFTWARE_BUS_OVERCURRENT = 0x0102,
+    HARDWARE_BUS_OVERCURRENT_COMPARATOR = 0x0103,
+    HARDWARE_FAULT_UNKNOWN = 0x01FF,
+    IF_SMO_STARTUP_HANDOVER_FAILED = 0x0201,
+};
+
 /* ============================================================
  * 通用返回结果 — API 调用返回值
  * ============================================================ */
@@ -346,13 +354,14 @@ enum class MotorConfigFaultDetail : uint16_t
 {
     NONE = 0x0000, // 无配置错误
 
-    BUILD_CURRENT_SENSE_MODE_INVALID = 0x0101, // BuildCfg 电流采样模式不是 1/2/3
+    BUILD_CURRENT_SENSE_MODE_INVALID = 0x0101, // BuildCfg 电流采样模式不是 2/3
     BUILD_NTC_SLOTS_INVALID = 0x0102, // BuildCfg NTC 通道数超出 0~4 范围
     BUILD_REDUNDANT_REQUIRES_SENSOR = 0x0103, // BuildCfg 启用冗余传感器但未启用 SENSOR 能力
     BUILD_OUTPUT_REQUIRES_SENSOR = 0x0104, // BuildCfg 启用输出侧传感器但未启用 SENSOR 能力
     BUILD_REGEN_REQUIRES_ENERGY_FSM = 0x0105, // BuildCfg 启用电池回充但未编译制动能量 FSM
     BUILD_RESISTOR_REQUIRES_ENERGY_FSM = 0x0106, // BuildCfg 启用制动电阻但未编译制动能量 FSM
     BUILD_TICK_PROFILING_UNSUPPORTED = 0x0107, // 当前平台不支持内部 tick profiling
+    BUILD_DEBUG_MODE_CONFLICT = 0x0108, // 同时启动了多个debug用例 debug用例同一时间只能开启一个
 
     HAL_NULL = 0x0201, // MotorCfg 未绑定 HAL 接口
     POLE_PAIRS_INVALID = 0x0202, // 极对数为 0
@@ -364,11 +373,6 @@ enum class MotorConfigFaultDetail : uint16_t
     PHASE_CURRENT_MASK_INVALID = 0x0209, // BSP 上报的相电流有效通道 mask 含非法位
     PHASE_CURRENT_DUAL_MASK_INVALID = 0x020A, // 双电阻模式下 BSP 未声明恰好两个有效相电流通道
     PHASE_CURRENT_TRIPLE_MASK_INVALID = 0x020B, // 三电阻模式下 BSP 未声明 U/V/W 三相全部有效
-    PHASE_CURRENT_SINGLE_SHUNT_MASK_INVALID = 0x021B, // 单电阻模式下 BSP 不应声明独立相电流通道
-    SINGLE_SHUNT_HAL_INVALID = 0x021C, // 单电阻模式缺少 raw pair 读取或采样 schedule 下发回调
-    SINGLE_SHUNT_WINDOW_INVALID = 0x021D, // 单电阻最小采样窗口参数非法或超过 PWM 周期可用范围
-    SINGLE_SHUNT_REQUIRES_SHUNT_SENSOR = 0x021E, // 单电阻模式要求电流传感器类型为分流电阻
-    SINGLE_SHUNT_REQUIRES_SVPWM = 0x021F, // 单电阻重构当前只支持 SVPWM 调制
     SENSOR_LPF_INVALID = 0x020C, // 采样低通滤波时间常数不是有限值
     SENSOR_LPF_NEGATIVE = 0x020D, // 采样低通滤波时间常数为负数
     VBUS_CONFIG_INVALID = 0x020E, // 母线电压分压或采样参数非法
@@ -384,6 +388,8 @@ enum class MotorConfigFaultDetail : uint16_t
     BRAKE_CHOPPER_REQUIRES_RESISTOR = 0x0218, // 启用制动斩波但未配置制动电阻
     PHYSICAL_PARAM_INVALID = 0x0219, // 电机物理参数来源或固化辨识值非法
     CURRENT_SENSOR_CONFIG_INVALID = 0x021A, // 电流传感器类型、灵敏度、电阻或放大倍数非法
+    HAL_PWM_Q15_MISSING = 0x021B, // fixed-q15 后端要求 BSP 提供 set_duty_q15
+    CONTROL_DIRECTION_INVALID = 0x021C, // API 方向映射只允许 +1/-1
 
     STARTUP_DEBUG_API_DISABLED = 0x0301, // 启动目标为调试模式但危险测试 API 未编译
     STARTUP_IF_DEBUG_DISABLED = 0x0302, // 启动目标为 IF 调试模式但 IF 启动能力未编译
@@ -417,8 +423,6 @@ enum class MotorConfigFaultDetail : uint16_t
     FEEDBACK_FLYING_START_NOT_BUILT = 0x0416, // 顺逆风启动能力未编译
     FEEDBACK_FLYING_START_NEEDS_PHASE_VOLTAGE = 0x0417, // 顺逆风启动需要相电压采样能力
     FEEDBACK_FLYING_START_UNAVAILABLE = 0x0418, // 顺逆风启动执行链路当前不可用
-    FEEDBACK_SINGLE_SHUNT_HFI_UNSUPPORTED = 0x041E, // 单电阻采样不支持 HFI 启动、稳态源或调试入口
-
     /* 0x04xx: IF 启动前转子静止保证机制 */
     IF_STATIONARY_GUARANTEE_REQUIRED        = 0x0419, // IF 启动未配置任何静止保证机制
     IF_STATIONARY_NEEDS_PHASE_VOLTAGE_BUILD = 0x041A, // 选择相电压顺逆风判断但 BuildCfg 或 MotorCfg 未启用相电压
@@ -570,9 +574,9 @@ enum class HfiInjectionMode : uint8_t
 
 enum class SensorFaultAction : uint8_t
 {
-    STOP                    = 0, // 当前唯一已接通执行链的策略: 立即停机
-    SWITCH_TO_CONVERGED_SMO = 1, // 预留: 主传感器失效后切到已收敛的 SMO
-    SWITCH_TO_HFI           = 2, // 预留: 中低速失效后切到 HFI
+    STOP                    = 0, // 立即停机
+    SWITCH_TO_CONVERGED_SMO = 1, // 主传感器失效后切到已收敛的 SMO
+    SWITCH_TO_HFI           = 2, // 中低速失效后切到 HFI
 };
 
 enum class AngleFeedbackClass : uint8_t
@@ -645,13 +649,63 @@ struct MotorVFStartupProfile
     volatile uint8_t phase_count;               // 启用的阶段数量，可在调试器中临时修改
 };
 
+#ifndef LIB_MOTOR_IF_PROFILE_MAX_PHASES
+#define LIB_MOTOR_IF_PROFILE_MAX_PHASES 8U
+#endif
+
+#ifndef LIB_MOTOR_DEBUG_IF_PROFILE_MAX_PHASES
+#define LIB_MOTOR_DEBUG_IF_PROFILE_MAX_PHASES LIB_MOTOR_IF_PROFILE_MAX_PHASES
+#endif
+
+enum class MotorIFStartupPhaseType : uint8_t
+{
+    ALIGNMENT = 0,
+    RAMP,
+};
+
 struct MotorIFStartupPhase
 {
-    float duration_s;       // 阶段持续时间，=0 时按一个控制周期处理
-    float final_speed_rpm;  // 本阶段结束时的机械转速目标
+    MotorIFStartupPhaseType type;
+    float duration_s;       // ALIGNMENT: Id 爬升时间；RAMP: 本段插值时间
+    float hold_time_s;      // 仅 ALIGNMENT 使用，达到目标 Id 后的保持时间
+    float final_speed_rpm;  // ALIGNMENT 固定为 0；RAMP 为本段结束机械转速
     float final_id_a;       // 本阶段结束时的 d 轴电流目标
-    float final_iq_a;       // 本阶段结束时的 q 轴电流目标
+    float final_iq_a;       // ALIGNMENT 固定为 0；RAMP 为本段结束 q 轴电流
+
+    static constexpr MotorIFStartupPhase Alignment(float current_ramp_time_s,
+                                                    float hold_time_s,
+                                                    float final_id_a);
+
+    static constexpr MotorIFStartupPhase Ramp(float duration_s,
+                                              float final_speed_rpm,
+                                              float final_id_a,
+                                              float final_iq_a);
 };
+
+constexpr MotorIFStartupPhase MotorIFStartupPhase::Alignment(float current_ramp_time_s,
+                                                             float hold_time_s,
+                                                             float final_id_a)
+{
+    return MotorIFStartupPhase{MotorIFStartupPhaseType::ALIGNMENT,
+                               current_ramp_time_s,
+                               hold_time_s,
+                               0.0f,
+                               final_id_a,
+                               0.0f};
+}
+
+constexpr MotorIFStartupPhase MotorIFStartupPhase::Ramp(float duration_s,
+                                                        float final_speed_rpm,
+                                                        float final_id_a,
+                                                        float final_iq_a)
+{
+    return MotorIFStartupPhase{MotorIFStartupPhaseType::RAMP,
+                               duration_s,
+                               0.0f,
+                               final_speed_rpm,
+                               final_id_a,
+                               final_iq_a};
+}
 
 struct MotorIFStartupProfile
 {
@@ -683,7 +737,7 @@ struct MotorEvent
     uint8_t motor_stalled      : 1; // 堵转标志 (过流电机关断)
     uint8_t budget_expired    : 1; // 上层 setEnergyBudget 已超时 (BRAKE_ON_LOSS 模式触发故障)
     uint8_t rl_identify_done  : 1; // [P2] RL 辨识完成 (rs_ohm_identified/ls_h_identified 已写入)
-    uint8_t ke_identify_done  : 1; // [P2] Ke 辨识完成 (ke_v_per_rad_s_identified 已写入, 仅 startKEstimation API)
+    uint8_t ke_identify_done  : 1; // [P2] Ke 辨识完成预留位，当前 startKEstimation 尚未接入有效写入源
     uint8_t flying_start_done : 1; // [P2] 顺逆风 PHASE_VOLTAGE 启动完成 (转子角度已重构 seedAngle SMO)
 
     MotorEvent()
@@ -691,6 +745,69 @@ struct MotorEvent
         , adc_ready(0), motor_stalled(0), budget_expired(0)
         , rl_identify_done(0), ke_identify_done(0), flying_start_done(0)
     {}
+};
+
+/* ============================================================
+ * MotorTelemetryChannel — 按需导出的 float 监控通道
+ *
+ * 用于 VOFA/串口等低频遥测。调用方传入通道列表, Lib 只转换这些字段。
+ * fixed-q15 后端下转换发生在 getter 调用点, 不进入 ADC tick 主路径。
+ * ============================================================ */
+enum class MotorTelemetryChannel : uint8_t
+{
+    PhaseCurrentA = 0,
+    PhaseCurrentB,
+    PhaseCurrentC,
+    BusCurrent,
+    BusVoltage,
+    SpeedRpm,
+    Id,
+    Iq,
+    IAlpha,
+    IBeta,
+    Vd,
+    Vq,
+    VAlpha,
+    VBeta,
+    TargetId,
+    TargetIq,
+    TargetRpm,
+    SpeedRefLimited,
+    SpeedPidIq,
+    IqRefCommand,
+    IqRefLimited,
+    DutyA,
+    DutyB,
+    DutyC,
+    AngleElec,
+    AngleCommand,
+    Temperature0,
+    Temperature1,
+    Temperature2,
+    Temperature3,
+    AdcRawPhaseU,
+    AdcRawPhaseV,
+    AdcRawPhaseW,
+    AdcRawBusCurrent,
+    AdcRawVbus,
+    AdcRawPhaseVoltageU,
+    AdcRawPhaseVoltageV,
+    AdcRawPhaseVoltageW,
+    AdcRawTemp0,
+    AdcRawTemp1,
+    AdcRawTemp2,
+    AdcRawTemp3,
+    SpeedRpmObserver,
+    SpeedRpmSensor,
+    AngleElecObserver,
+    AngleElecSensor,
+    AngleMechSensor,
+    ObserverError,
+    ObserverPllError,
+    ObserverSignalLevel,
+    ObserverQuality,
+    ObserverValidTicks,
+    ObserverConverged,
 };
 
 /* ============================================================
@@ -704,6 +821,7 @@ struct MotorEvent
 struct MotorMonitorData
 {
     MotorConfigFaultDetail config_fault_detail;
+    MotorRuntimeFaultDetail runtime_fault_detail;
 #if MOTOR_BUILD_HAS_PHASE_VOLTAGE
     float v_phase_u;
     float v_phase_v;
@@ -803,7 +921,7 @@ struct MotorDebugData
 #if MOTOR_BUILD_NTC_SLOTS > 0
     float temperature_c[MOTOR_BUILD_NTC_SLOTS];    // NTC temperature in Celsius
 #endif
-#if LIB_MOTOR_ENABLE_DANGEROUS_TEST_API
+#if LIB_MOTOR_ENABLE_DEBUG_ANY
     uint16_t adc_raw_phase_u;
     uint16_t adc_raw_phase_v;
     uint16_t adc_raw_phase_w;

@@ -35,7 +35,7 @@ float slewFloat(float current, float target, float max_delta)
  * 优先级:
  *   1. cfg.motion.max_iq_ref_a      (用户配置的软限制, 速度环输出上限)
  *   2. cfg.physical.rated_current   (电机额定连续电流)
- *   3. cfg.limit.max_current_a      (硬保护过流阈值, 最后兜底)
+ *   3. cfg.limit.max_phase_current_a (相线软件过流阈值, 最后兜底)
  */
 float MotorTargetLimiter::configuredIqLimit(const MotorConfig& cfg)
 {
@@ -47,7 +47,7 @@ float MotorTargetLimiter::configuredIqLimit(const MotorConfig& cfg)
     {
         return cfg.physical.rated_current;
     }
-    return cfg.limit.max_current_a;
+    return cfg.limit.max_phase_current_a;
 }
 
 /*
@@ -91,7 +91,6 @@ float MotorTargetLimiter::limitSpeedReference(const MotorConfig& cfg,
  *   3. 转矩保护带: 转矩模式下进 guard_band 后按线性比例削减 Iq (0→1)
  */
 float MotorTargetLimiter::limitIqReference(const MotorConfig& cfg,
-                                           Mode mode,
                                            float speed_rpm,
                                            float iq_ref)
 {

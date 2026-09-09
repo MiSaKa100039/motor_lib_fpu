@@ -12,6 +12,14 @@
 
 #include <stdint.h>
 
+#define BSP_MOTOR_HW_FAULT_NONE        (0UL)
+#define BSP_MOTOR_HW_FAULT_TIM1_BREAK  (1UL << 0)
+#define BSP_MOTOR_HW_FAULT_TIM1_BREAK2 (1UL << 1)
+#define BSP_MOTOR_HW_FAULT_COMPARATOR  (1UL << 2)
+#define BSP_MOTOR_HW_FAULT_GATE_DRIVER (1UL << 3)
+#define BSP_MOTOR_HW_FAULT_UNKNOWN     (1UL << 31)
+#define BSP_MOTOR_HW_FAULT_ALL         (0xFFFFFFFFUL)
+
 #ifdef __cplusplus
 #include "Motor_HAL_Interface.h"
 #include "Platform_MotorFeatures.h"
@@ -47,6 +55,10 @@ void BSP_Motor_SetControlFrequencyHz(float control_freq_hz);
  * 在 MotorAPI::init() 之后调用
  */
 void BSP_Motor_Hardware_Start(void);
+uint8_t BSP_Motor_ResyncSamplingPath(void);
+void BSP_Motor_LatchHardwareFaultFromISR(uint32_t flags);
+uint32_t BSP_Motor_ReadHardwareFaultLatch(void);
+void BSP_Motor_ClearHardwareFaultLatch(uint32_t flags);
 
 /*
  * 取走一次遥测发送请求:
@@ -60,6 +72,7 @@ bool BSP_Motor_TakeTelemetryPending(void);
 extern volatile uint32_t BSP_Motor_TelemetryProducedCount;
 extern volatile uint32_t BSP_Motor_TelemetryConsumedCount;
 extern volatile uint32_t BSP_Motor_TelemetryDroppedCount;
+extern volatile uint32_t BSP_Motor_HardwareFaultLatch;
 
 #ifdef MOTOR_BUILD_ENABLE_TICK_PROFILING
 extern volatile uint32_t BSP_Motor_InjectedAdc1CallbackRateHz; // 最近 1 秒窗口内处理到的 ADC 注入回调频率

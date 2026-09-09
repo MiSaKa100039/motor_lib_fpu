@@ -3,6 +3,198 @@
 namespace Lib_Motor
 {
 
+#if LIB_MOTOR_NUMERIC_BACKEND_FIXED_Q15 && \
+    (LIB_MOTOR_ENABLE_DEBUG_VF_CONTROL || LIB_MOTOR_ENABLE_IF_STARTUP || LIB_MOTOR_ENABLE_DEBUG_IF_ANY)
+namespace
+{
+
+uint32_t profileSecondsToTicks(float seconds, float dt)
+{
+    uint32_t duration_ticks = 1U;
+    if (seconds > 0.0f && dt > 0.0f)
+    {
+        const float ticks = seconds / dt;
+        duration_ticks =
+            (ticks >= 4294967040.0f)
+                ? 0xFFFFFFFFUL
+                : static_cast<uint32_t>(ticks + 0.5f);
+        if (duration_ticks == 0U)
+        {
+            duration_ticks = 1U;
+        }
+    }
+    return duration_ticks;
+}
+
+#if LIB_MOTOR_ENABLE_DEBUG_PROFILE_ANY
+uint32_t calculateQ15SpeedRampStep(RuntimeSpeed target_rpm, uint32_t ramp_ticks)
+{
+    return AngleGenerator::calculateSpeedStepQ15(target_rpm, ramp_ticks);
+}
+#endif
+
+void configureQ15DdaStep(FixedNumeric::q15_t start,
+                         FixedNumeric::q15_t final,
+                         uint32_t duration_ticks,
+                         std::int32_t& step_q15,
+                         std::uint32_t& remainder_q15,
+                         std::int8_t& remainder_sign)
+{
+    if (duration_ticks == 0U)
+    {
+        duration_ticks = 1U;
+    }
+
+    const std::int32_t delta =
+        static_cast<std::int32_t>(final) - static_cast<std::int32_t>(start);
+    const std::uint32_t abs_delta =
+        (delta < 0)
+            ? static_cast<std::uint32_t>(-delta)
+            : static_cast<std::uint32_t>(delta);
+
+    remainder_sign = (delta > 0) ? 1 : ((delta < 0) ? -1 : 0);
+    if (abs_delta == 0U)
+    {
+        step_q15 = 0;
+        remainder_q15 = 0U;
+        remainder_sign = 0;
+        return;
+    }
+
+    if (duration_ticks > abs_delta)
+    {
+        step_q15 = 0;
+        remainder_q15 = abs_delta;
+        return;
+    }
+
+    const std::int32_t divisor = static_cast<std::int32_t>(duration_ticks);
+    step_q15 = delta / divisor;
+    remainder_q15 = abs_delta % duration_ticks;
+}
+
+#if LIB_MOTOR_ENABLE_DEBUG_VF_CONTROL
+bool buildDebugVFProfileSnapshot(const MotorVFStartupProfile* profile,
+                                 const MotorConfig& cfg,
+                                 RuntimeCtx& ctx,
+                                 float dt)
+{
+    if (profile == nullptr || profile->phases == nullptr)
+    {
+        ctx.debug_vf_profile_phase_count = 0U;
+        return false;
+    }
+
+    const uint8_t phase_count = profile->phase_count;
+    if (phase_count == 0U || phase_count > LIB_MOTOR_DEBUG_VF_PROFILE_MAX_PHASES)
+    {
+        ctx.debug_vf_profile_phase_count = 0U;
+        return false;
+    }
+
+    RuntimeSpeed start_speed = 0;
+    RuntimeDuty start_duty = 0;
+    for (uint8_t i = 0U; i < phase_count; ++i)
+    {
+        const volatile MotorVFStartupPhase& phase = profile->phases[i];
+        RuntimeVFStartupPhaseQ15& snapshot = ctx.debug_vf_profile_phases[i];
+        snapshot.duration_ticks = profileSecondsToTicks(phase.duration_s, dt);
+        snapshot.final_speed_rpm =
+            runtimeSpeedFromUserPhysical(cfg, ctx, phase.final_speed_rpm);
+        snapshot.final_duty = runtimeClampDuty(
+            runtimeDutyFromNormalized(phase.final_duty),
+            FixedNumeric::kQ15One);
+
+        configureQ15DdaStep(start_speed,
+                            snapshot.final_speed_rpm,
+                            snapshot.duration_ticks,
+                            snapshot.speed_step_q15,
+                            snapshot.speed_remainder_q15,
+                            snapshot.speed_remainder_sign);
+        configureQ15DdaStep(start_duty,
+                            snapshot.final_duty,
+                            snapshot.duration_ticks,
+                            snapshot.duty_step_q15,
+                            snapshot.duty_remainder_q15,
+                            snapshot.duty_remainder_sign);
+        start_speed = snapshot.final_speed_rpm;
+        start_duty = snapshot.final_duty;
+    }
+
+    ctx.debug_vf_profile_phase_count = phase_count;
+    return true;
+}
+#endif
+
+#if LIB_MOTOR_ENABLE_IF_STARTUP || LIB_MOTOR_ENABLE_DEBUG_IF_ANY
+bool buildIFProfileSnapshot(const MotorIFStartupProfile* profile,
+                            const MotorConfig& cfg,
+                            RuntimeCtx& ctx,
+                            RuntimeIFStartupPhaseQ15* snapshots,
+                            uint8_t max_phase_count,
+                            uint8_t& out_phase_count,
+                            float dt)
+{
+    out_phase_count = 0U;
+    if (profile == nullptr || profile->phases == nullptr)
+    {
+        return false;
+    }
+
+    const uint8_t phase_count = profile->phase_count;
+    if (phase_count == 0U || phase_count > max_phase_count)
+    {
+        return false;
+    }
+
+    RuntimeSpeed start_speed = 0;
+    RuntimeCurrent start_id = 0;
+    RuntimeCurrent start_iq = 0;
+    for (uint8_t i = 0U; i < phase_count; ++i)
+    {
+        const volatile MotorIFStartupPhase& phase = profile->phases[i];
+        RuntimeIFStartupPhaseQ15& snapshot = snapshots[i];
+        snapshot.type = phase.type;
+        snapshot.duration_ticks = profileSecondsToTicks(phase.duration_s, dt);
+        snapshot.hold_ticks = (phase.type == MotorIFStartupPhaseType::ALIGNMENT)
+            ? profileSecondsToTicks(phase.hold_time_s, dt)
+            : 0U;
+        snapshot.final_speed_rpm =
+            runtimeSpeedFromUserPhysical(cfg, ctx, phase.final_speed_rpm);
+        snapshot.final_id = runtimeCurrentFromPhysical(ctx, phase.final_id_a);
+        snapshot.final_iq = runtimeCurrentFromPhysical(ctx, phase.final_iq_a);
+
+        configureQ15DdaStep(start_speed,
+                            snapshot.final_speed_rpm,
+                            snapshot.duration_ticks,
+                            snapshot.speed_step_q15,
+                            snapshot.speed_remainder_q15,
+                            snapshot.speed_remainder_sign);
+        configureQ15DdaStep(start_id,
+                            snapshot.final_id,
+                            snapshot.duration_ticks,
+                            snapshot.id_step_q15,
+                            snapshot.id_remainder_q15,
+                            snapshot.id_remainder_sign);
+        configureQ15DdaStep(start_iq,
+                            snapshot.final_iq,
+                            snapshot.duration_ticks,
+                            snapshot.iq_step_q15,
+                            snapshot.iq_remainder_q15,
+                            snapshot.iq_remainder_sign);
+        start_speed = snapshot.final_speed_rpm;
+        start_id = snapshot.final_id;
+        start_iq = snapshot.final_iq;
+    }
+
+    out_phase_count = phase_count;
+    return true;
+}
+#endif
+
+} // namespace
+#endif
+
 /* setTargetSpeed -- 直接覆盖速度目标值 (RPM), 仅写目标, 不切模式
  *
  * 跨零软减速 (本轮新增):
@@ -13,35 +205,38 @@ namespace Lib_Motor
  */
 void MotorManager::setTargetSpeed(float rpm)
 {
-    const float current_target = ctx_.target_rpm;
-    const bool sign_flip = (current_target * rpm < 0.0f);  // 反号
-    const bool fast_running = fabsf(ctx_.speed_rpm) > config_.motion.reverse_zero_band_rpm;
+    const float internal_rpm = runtimeUserSpeedToInternalPhysical(config_, rpm);
+    const float current_target = runtimeSpeedToPhysical(ctx_, ctx_.target_rpm);
+    const bool sign_flip = (current_target * internal_rpm < 0.0f);  // 反号
+    const bool fast_running =
+        fabsf(runtimeSpeedToPhysical(ctx_, ctx_.speed_rpm)) >
+        config_.motion.reverse_zero_band_rpm;
 
     if (sign_flip && fast_running)
     {
         // 暂存反向目标, 当前 target 写 0 (速度环会把速度带到 0)
-        ctx_.pending_reverse_rpm = rpm;
-        ctx_.target_rpm = 0.0f;
-        syncFastRuntimeTargets();
+        ctx_.pending_reverse_rpm = runtimeSpeedFromPhysical(ctx_, internal_rpm);
+        ctx_.target_rpm = 0;
+        syncRuntimeTargets();
         return;
     }
 
-    ctx_.target_rpm = rpm;
-    syncFastRuntimeTargets();
+    ctx_.target_rpm = runtimeSpeedFromPhysical(ctx_, internal_rpm);
+    syncRuntimeTargets();
 }
 
 /* setTargetTorque -- 直接覆盖 Q 轴电流目标 (A), 仅写目标, 不切模式 */
 void MotorManager::setTargetTorque(float current_a)
 {
-    ctx_.target_iq = current_a;
-    syncFastRuntimeTargets();
+    ctx_.target_iq = runtimeCurrentFromPhysical(ctx_, current_a);
+    syncRuntimeTargets();
 }
 
 /* setTargetId -- 直接覆盖 D 轴电流目标 (A), 仅写目标, 不切模式 */
 void MotorManager::setTargetId(float current_a)
 {
-    ctx_.target_id = current_a;
-    syncFastRuntimeTargets();
+    ctx_.target_id = runtimeCurrentFromPhysical(ctx_, current_a);
+    syncRuntimeTargets();
 }
 
 /*
@@ -64,10 +259,10 @@ void MotorManager::applySetpoint(const MotionSetpoint& sp)
     switch (sp.mode)
     {
         case Mode::TORQUE_CONTROL:
-            ctx_.target_iq = sp.torque_ff;
+            ctx_.target_iq = runtimeCurrentFromPhysical(ctx_, sp.torque_ff);
             break;
         case Mode::VELOCITY_CONTROL:
-            ctx_.target_rpm = sp.vel_ff;
+            ctx_.target_rpm = runtimeSpeedFromUserPhysical(config_, ctx_, sp.vel_ff);
             break;
 #if LIB_MOTOR_ENABLE_POSITION_CONTROL
         case Mode::POSITION_CONTROL:
@@ -95,7 +290,7 @@ void MotorManager::applySetpoint(const MotionSetpoint& sp)
         default:
             break;
     }
-    syncFastRuntimeTargets();
+    syncRuntimeTargets();
 }
 
 /* writeSetpoint: 外部流式入口, 记录流状态后复用内部目标落地路径。 */
@@ -281,6 +476,9 @@ Result MotorManager::setRunPolicy(const MotorRunPolicy& policy)
 
     active_policy_ = policy;
     pending_policy_ = policy;
+#if LIB_MOTOR_ENABLE_IF_STARTUP
+    clearStartupRestartState();
+#endif
     return Result::Ok;
 }
 
@@ -355,17 +553,14 @@ void MotorManager::setEnergyBudget(const MotorEnergyBudget& budget)
 bool MotorManager::setPIDGains(PidGroup group, float kp, float ki, float kd)
 {
     PIDParam param;
-    PidController* pid = nullptr;
 
     switch (group)
     {
         case PidGroup::CurrentD:
             param = config_.control.current_d;
-            pid = &controller_.pid_d;
             break;
         case PidGroup::CurrentQ:
             param = config_.control.current_q;
-            pid = &controller_.pid_q;
             break;
         default:
             return false;
@@ -378,93 +573,259 @@ bool MotorManager::setPIDGains(PidGroup group, float kp, float ki, float kd)
     const bool use_critical =
         (config_.hal && config_.hal->enter_critical && config_.hal->exit_critical);
     if (use_critical) config_.hal->enter_critical();
-    pid->init(param);
+    const bool updated = controller_.setCurrentPidParam(group, param);
+#if LIB_MOTOR_NUMERIC_BACKEND_FIXED_Q15
+    if (updated)
+    {
+        configureFixedCurrentPidRuntime(false);
+    }
+#endif
     if (use_critical) config_.hal->exit_critical();
 
-    return true;
+    return updated;
 }
 
 /* setVFDutyBias -- 设置 V/F 控制电压偏置 (占空比偏置, [0, 1]) */
-#if LIB_MOTOR_ENABLE_DANGEROUS_TEST_API
+#if LIB_MOTOR_ENABLE_DEBUG_VF_CONTROL
 void MotorManager::setVFDutyBias(float bias)
 {
+#if LIB_MOTOR_NUMERIC_BACKEND_FIXED_Q15
+    ctx_.vf_duty_bias = runtimeClampDuty(
+        runtimeDutyFromNormalized(bias),
+        FixedNumeric::kQ15One);
+#else
     ctx_.vf_duty_bias = bias;
+#endif
 }
+#endif
 
+#if LIB_MOTOR_ENABLE_DEBUG_PWM_MANUAL
 /* setRawPWM -- 调试用: 直接设置三相 PWM 占空比, 绕过 FOC */
 void MotorManager::setRawPWM(float u, float v, float w)
 {
+#if LIB_MOTOR_NUMERIC_BACKEND_FIXED_Q15
+    ctx_.debug_pwm_manual_a = FixedNumeric::fromNormalized(u);
+    ctx_.debug_pwm_manual_b = FixedNumeric::fromNormalized(v);
+    ctx_.debug_pwm_manual_c = FixedNumeric::fromNormalized(w);
+#else
     ctx_.test_u = u;
     ctx_.test_v = v;
     ctx_.test_w = w;
+#endif
 }
+#endif
 
+#if LIB_MOTOR_ENABLE_DEBUG_PROFILE_ANY
 /* setDebugRampTime -- 设置 IF/VF 强拖速度斜坡时间 (s), <=0 使用默认值 */
 void MotorManager::setDebugRampTime(float seconds)
 {
+#if LIB_MOTOR_NUMERIC_BACKEND_FIXED_Q15
+    if (seconds > 0.0f && dt_ > 0.0f)
+    {
+        ctx_.debug_ramp_ticks = profileSecondsToTicks(seconds, dt_);
+    }
+    else
+    {
+        ctx_.debug_ramp_ticks = 0U;
+    }
+    ctx_.debug_ramp_speed_step_q15 = 0U;
+#else
     ctx_.debug_ramp_time_s = (seconds > 0.0f) ? seconds : 0.0f;
+#endif
 }
 
 void MotorManager::clearDebugStartupProfiles()
 {
+#if LIB_MOTOR_ENABLE_DEBUG_VF_CONTROL
+#if LIB_MOTOR_NUMERIC_BACKEND_FIXED_Q15
+    ctx_.debug_vf_profile_phase_count = 0U;
+#else
     ctx_.debug_vf_profile = nullptr;
-#if LIB_MOTOR_ENABLE_IF_STARTUP
+#endif
+#endif
+#if LIB_MOTOR_ENABLE_DEBUG_IF_ANY
+#if LIB_MOTOR_NUMERIC_BACKEND_FIXED_Q15
+    ctx_.debug_if_profile_phase_count = 0U;
+#else
     ctx_.debug_if_profile = nullptr;
+#endif
 #endif
     resetDebugProfileState();
 }
+#endif
 
-void MotorManager::setDebugVFStartupProfile(const MotorVFStartupProfile* profile)
+#if LIB_MOTOR_ENABLE_IF_STARTUP && LIB_MOTOR_NUMERIC_BACKEND_FIXED_Q15
+bool MotorManager::prepareIFStartupProfileSnapshot(const MotorIFStartupProfile* profile)
 {
+    return buildIFProfileSnapshot(profile,
+                                  config_,
+                                  ctx_,
+                                  ctx_.if_profile_phases,
+                                  LIB_MOTOR_IF_PROFILE_MAX_PHASES,
+                                  ctx_.if_profile_phase_count,
+                                  dt_);
+}
+
+void MotorManager::prepareIFStartupRuntimeForStart()
+{
+    resetIFStartupProfileState();
+
+    if (active_policy_.startup_source != StartupSource::IF)
+    {
+        ctx_.if_profile_phase_count = 0U;
+        return;
+    }
+
+    prepareIFStartupProfileSnapshot(config_.observer.if_startup_profile);
+}
+#endif
+
+#if LIB_MOTOR_ENABLE_DEBUG_PROFILE_ANY && LIB_MOTOR_NUMERIC_BACKEND_FIXED_Q15
+void MotorManager::prepareDebugOpenLoopAngleRampForStart()
+{
+    ctx_.debug_ramp_speed_step_q15 = 0U;
+
+    const bool debug_open_loop =
+        false
+#if LIB_MOTOR_ENABLE_DEBUG_VF_CONTROL
+        || target_mode_ == Mode::DEBUG_VF_DRAG
+#endif
+#if LIB_MOTOR_ENABLE_DEBUG_IF_CONTROL
+        || target_mode_ == Mode::DEBUG_IF_DRAG
+#endif
+#if LIB_MOTOR_ENABLE_DEBUG_IF_SMO_OBSERVER
+        || target_mode_ == Mode::DEBUG_IF_SMO_OBSERVER
+#endif
+#if LIB_MOTOR_ENABLE_DEBUG_IF_HFI_OBSERVER
+        || target_mode_ == Mode::DEBUG_IF_HFI_OBSERVER
+#endif
+        ;
+    if (!debug_open_loop)
+    {
+        return;
+    }
+
+#if LIB_MOTOR_ENABLE_DEBUG_VF_CONTROL
+    if (target_mode_ == Mode::DEBUG_VF_DRAG &&
+        ctx_.debug_vf_profile_phase_count > 0U)
+    {
+        return;
+    }
+#endif
+#if LIB_MOTOR_ENABLE_DEBUG_IF_ANY
+    if ((false
+#if LIB_MOTOR_ENABLE_DEBUG_IF_CONTROL
+         || target_mode_ == Mode::DEBUG_IF_DRAG
+#endif
+#if LIB_MOTOR_ENABLE_DEBUG_IF_SMO_OBSERVER
+         || target_mode_ == Mode::DEBUG_IF_SMO_OBSERVER
+#endif
+#if LIB_MOTOR_ENABLE_DEBUG_IF_HFI_OBSERVER
+         || target_mode_ == Mode::DEBUG_IF_HFI_OBSERVER
+#endif
+        ) &&
+        ctx_.debug_if_profile_phase_count > 0U)
+    {
+        return;
+    }
+#endif
+
+    ctx_.debug_ramp_speed_step_q15 =
+        calculateQ15SpeedRampStep(ctx_.target_rpm, ctx_.debug_ramp_ticks);
+}
+#endif
+
+#if LIB_MOTOR_ENABLE_DEBUG_VF_CONTROL
+bool MotorManager::setDebugVFStartupProfile(const MotorVFStartupProfile* profile)
+{
+#if LIB_MOTOR_NUMERIC_BACKEND_FIXED_Q15
+    if (!buildDebugVFProfileSnapshot(profile, config_, ctx_, dt_))
+    {
+        resetDebugProfileState();
+        return false;
+    }
+#else
     ctx_.debug_vf_profile = profile;
-#if LIB_MOTOR_ENABLE_IF_STARTUP
+#endif
+#if LIB_MOTOR_ENABLE_DEBUG_IF_ANY
+#if LIB_MOTOR_NUMERIC_BACKEND_FIXED_Q15
+    ctx_.debug_if_profile_phase_count = 0U;
+#else
     ctx_.debug_if_profile = nullptr;
 #endif
+#endif
     resetDebugProfileState();
+    return true;
 }
+#endif
 
-#if LIB_MOTOR_ENABLE_IF_STARTUP
-void MotorManager::setDebugIFStartupProfile(const MotorIFStartupProfile* profile)
+#if LIB_MOTOR_ENABLE_DEBUG_IF_ANY
+bool MotorManager::setDebugIFStartupProfile(const MotorIFStartupProfile* profile)
 {
-    ctx_.debug_if_profile = profile;
+#if LIB_MOTOR_ENABLE_DEBUG_VF_CONTROL
+#if LIB_MOTOR_NUMERIC_BACKEND_FIXED_Q15
+    ctx_.debug_vf_profile_phase_count = 0U;
+#else
     ctx_.debug_vf_profile = nullptr;
+#endif
+#endif
+#if LIB_MOTOR_NUMERIC_BACKEND_FIXED_Q15
+    if (!buildIFProfileSnapshot(profile,
+                                config_,
+                                ctx_,
+                                ctx_.debug_if_profile_phases,
+                                LIB_MOTOR_DEBUG_IF_PROFILE_MAX_PHASES,
+                                ctx_.debug_if_profile_phase_count,
+                                dt_))
+    {
+        resetDebugProfileState();
+        return false;
+    }
+#else
+    ctx_.debug_if_profile = profile;
+#endif
     resetDebugProfileState();
     controller_.reset();
 
     if (state_ != State::RUN)
     {
         if_angle_gen_.reset();
-        ctx_.angle_elec = 0.0f;
-        ctx_.angle_elec_command = 0.0f;
-        ctx_.speed_rpm = 0.0f;
+        ctx_.angle_elec = runtimeAngleFromRadians(0.0f);
+        ctx_.angle_elec_command = runtimeAngleFromRadians(0.0f);
+        ctx_.speed_rpm = runtimeSpeedFromPhysical(ctx_, 0.0f);
     }
 
-#if LIB_MOTOR_ENABLE_SMO
+#if LIB_MOTOR_ENABLE_DEBUG_IF_SMO_OBSERVER
     if (target_mode_ == Mode::DEBUG_IF_SMO_OBSERVER)
     {
         smo_.reset();
+        resetSmoAngleDirectionLatch();
+#if LIB_MOTOR_NUMERIC_BACKEND_FIXED_Q15
+        ctx_.smo_estimate = ObserverEstimateQ15();
+#else
         ctx_.smo_estimate = ObserverEstimate();
+#endif
         ctx_.angle_elec_observer = ctx_.angle_elec_command;
-        ctx_.speed_rpm_observer = 0.0f;
+        ctx_.speed_rpm_observer = runtimeSpeedFromPhysical(ctx_, 0.0f);
         event_.observer_converged = 0U;
         event_.speed_valid = 0U;
     }
 #endif
 
-#if LIB_MOTOR_ENABLE_HFI
+#if LIB_MOTOR_ENABLE_DEBUG_IF_HFI_OBSERVER
     if (target_mode_ == Mode::DEBUG_IF_HFI_OBSERVER)
     {
         hfi_.reset();
         ctx_.hfi_estimate = ObserverEstimate();
         ctx_.hfi_injection = HfiInjectionCommand();
         ctx_.angle_elec_observer = ctx_.angle_elec_command;
-        ctx_.speed_rpm_observer = 0.0f;
+        ctx_.speed_rpm_observer = runtimeSpeedFromPhysical(ctx_, 0.0f);
         event_.observer_converged = 0U;
         event_.speed_valid = 0U;
     }
 #endif
+
+    return true;
 }
 #endif
-#endif
 } // namespace Lib_Motor
-

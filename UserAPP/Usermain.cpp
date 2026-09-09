@@ -5,7 +5,6 @@
 #include "BSP_Motor.h"
 #include "Platform_Motor.h"
 #include "Platform_VOFA.h"
-#include "User_MotorTestConfig.h"
 #include "TestCfg/Platform_MotorTestConfig.h"
 
 #include <stdint.h>
@@ -15,34 +14,24 @@
 // TODO: 外部传感器错误判断
 // TODO: ISR 中断时间计算
 // TODO: 观测器 / 霍尔冗余
-// TODO: 未包含的文件
-// TODO: 库裁剪
 // TODO: 多编码器数据处理
 // TODO: 弱磁 park/clark 等幅值/等功率下电流环限流区别
 // TODO: 母线泄放 / 动能回收 / 刹车
-//全局方向
 //运行时正反切换
-//软硬件过流区分
-
-/*
- * 开发路线图:
- *
- * 共同基础:
- *   电流静态检查 → PWM → 低能量 VF → 锁轴电流 → IF
- *
- * 有感:
- *   被动读传感器 → VF 同步观察方向/极对数 → 编码器偏置 → SENSOR 闭环 → 环路整定
- *
- * 无感:
- *   VF/IF 正常 → 影子运行 SMO/HFI 对比角度 → 切换无感闭环 → 环路整定
- */
+//堵转保护以及检测
+//带载启动？
+//ramp之间的平滑过度
+//debug用例的影子字段调试
+//motorcfg中if启动参数的多余
+//IF对齐爬坡和持续时间
 
 volatile uint8_t CMD = 0;  // Ozone Watch: CMD
 volatile Lib_Motor::Result LastCmdResult = Lib_Motor::Result::Ok; // Ozone Watch: last command result
 
+
 static Lib_Motor::Result User_StartMotor(void)
 {
-#if defined(USER_MOTOR_TEST_PWM_MANUAL)
+#if LIB_MOTOR_ENABLE_DEBUG_PWM_MANUAL
     Global_Motor_0.unlockDebug();
     const Lib_Motor::Result result = Global_Motor_0.debugPWMManual(
         Platform_TestPWM_U,
@@ -50,44 +39,42 @@ static Lib_Motor::Result User_StartMotor(void)
         Platform_TestPWM_W);
     Global_Motor_0.lockDebug();
     return result;
-#elif defined(USER_MOTOR_TEST_CURRENT_LOCK)
+#elif LIB_MOTOR_ENABLE_DEBUG_CURRENT_LOCK
     Global_Motor_0.unlockDebug();
     const Lib_Motor::Result result = Global_Motor_0.debugCurrentLock(
         Platform_TestCurrentLockId,
         Platform_TestCurrentLockIq);
     Global_Motor_0.lockDebug();
     return result;
-#elif defined(USER_MOTOR_TEST_VF_CONTROL)
+#elif LIB_MOTOR_ENABLE_DEBUG_VF_CONTROL
     Global_Motor_0.unlockDebug();
     const Lib_Motor::Result result = Global_Motor_0.debugVFControl(
         Platform_TestVFStartupProfile);
     Global_Motor_0.lockDebug();
     return result;
-#elif defined(USER_MOTOR_TEST_IF_CONTROL)
+#elif LIB_MOTOR_ENABLE_DEBUG_IF_CONTROL
     Global_Motor_0.unlockDebug();
     const Lib_Motor::Result result = Global_Motor_0.debugIFControl(
-        Platform_TestIFStartupProfile);
+        Platform_Motor_GetIFStartupProfile());
     Global_Motor_0.lockDebug();
     return result;
-#elif defined(USER_MOTOR_TEST_IF_SMO_OBSERVER)
+#elif LIB_MOTOR_ENABLE_DEBUG_IF_SMO_OBSERVER
     Global_Motor_0.unlockDebug();
     const Lib_Motor::Result result = Global_Motor_0.debugIFSMOObserver(
-        Platform_TestIFStartupProfile);
+        Platform_Motor_GetIFStartupProfile());
     Global_Motor_0.lockDebug();
     return result;
-#elif defined(USER_MOTOR_TEST_IF_HFI_OBSERVER)
+#elif LIB_MOTOR_ENABLE_DEBUG_IF_HFI_OBSERVER
     Global_Motor_0.unlockDebug();
     const Lib_Motor::Result result = Global_Motor_0.debugIFHFIObserver(
-        Platform_TestIFStartupProfile);
+        Platform_Motor_GetIFStartupProfile());
     Global_Motor_0.lockDebug();
     return result;
-#elif defined(USER_MOTOR_TEST_HFI_OBSERVER)
+#elif LIB_MOTOR_ENABLE_DEBUG_HFI_OBSERVER
     Global_Motor_0.unlockDebug();
     const Lib_Motor::Result result = Global_Motor_0.debugHFIObserver();
     Global_Motor_0.lockDebug();
     return result;
-#elif defined(USER_MOTOR_TEST_RL_IDENTIFY)
-    return Global_Motor_0.startRLIdentification();
 #else
     return Global_Motor_0.start();
 #endif
@@ -99,24 +86,35 @@ static void User_SendVofaTelemetryIfPending(void)
     {
         return;
     }
+    static constexpr Lib_Motor::MotorTelemetryChannel kVofaChannels[] = {
+        // Lib_Motor::MotorTelemetryChannel::SpeedRpm,
+        // Lib_Motor::MotorTelemetryChannel::ObserverSignalLevel,
+        // Lib_Motor::MotorTelemetryChannel::ObserverPllError,
+        // Lib_Motor::MotorTelemetryChannel::ObserverValidTicks,
 
-    Lib_Motor::MotorMonitorData monitor{};
-    Global_Motor_0.getMonitorData(monitor);
+        // IF 模式下 SpeedRpm 为旋转磁场指令速度，并非独立实测转速。
+        Lib_Motor::MotorTelemetryChannel::SpeedRpm,
+        Lib_Motor::MotorTelemetryChannel::SpeedRpmObserver,
+        Lib_Motor::MotorTelemetryChannel::AngleCommand,
+        Lib_Motor::MotorTelemetryChannel::AngleElecObserver,
+        Lib_Motor::MotorTelemetryChannel::ObserverPllError,
 
-    float data[6] = {};
-    data[0]  = monitor.i_a;
-    data[1]  = monitor.i_b;
-    data[2]  = monitor.v_bus;
-    data[3]  = monitor.temperature[0];
-    data[4]  = monitor.speed_rpm_sensor;
-    data[5]  = monitor.i_q;
 
-    // float data[6] = {};
-    // data[0]  = 1;
-    // data[1]  = 2;
-    // data[2]  = 3;
+        // Lib_Motor::MotorTelemetryChannel::PhaseCurrentA,
+        // Lib_Motor::MotorTelemetryChannel::PhaseCurrentB,
+        // Lib_Motor::MotorTelemetryChannel::BusVoltage,
+        // Lib_Motor::MotorTelemetryChannel::BusCurrent,
+    };
+    static constexpr uint8_t kVofaChannelCount =
+        static_cast<uint8_t>(sizeof(kVofaChannels) / sizeof(kVofaChannels[0]));
 
-    Platform_VOFA_SendFloat(data, static_cast<uint8_t>(sizeof(data) / sizeof(data[0])));
+    float data[kVofaChannelCount] = {};
+    const uint8_t count =
+        Global_Motor_0.getTelemetryFloats(kVofaChannels, kVofaChannelCount, data);
+    if (count > 0U)
+    {
+        Platform_VOFA_SendFloat(data, count);
+    }
 }
 
 void User_Init(void)
@@ -147,8 +145,8 @@ void User_Loop(void)
     {
         case 1: LastCmdResult = User_StartMotor();                            break;
         case 2: LastCmdResult = Global_Motor_0.stop(Lib_Motor::StopMode::COAST); break;
-        // case 3: LastCmdResult = Global_Motor_0.stop(Lib_Motor::StopMode::ELECTRICAL_BRAKE);break;
-        case 4: LastCmdResult = Global_Motor_0.reset();                       break;
+        case 3: LastCmdResult = Global_Motor_0.stop(Lib_Motor::StopMode::ELECTRICAL_BRAKE);break;
+        case 4: LastCmdResult = Platform_Motor_ResetRuntimeAndSampling();      break;
         default: LastCmdResult = Lib_Motor::Result::InvalidParam;             break;
     }
 

@@ -42,15 +42,15 @@
 #define MOTOR_BUILD_MAX_INSTANCES 1
 
 // 电流采样模式: 2 = 双电阻采样(Iu+Iv, Iw 由 Kirchhoff 计算), 3 = 三电阻采样
-// Current sampling mode: 1=single DC-link shunt, 2=dual phase sensors, 3=triple phase sensors.
+// Current sampling mode: 2=dual phase sensors, 3=triple phase sensors.
 #ifndef MOTOR_BUILD_CURRENT_SENSE_MODE
-#define MOTOR_BUILD_CURRENT_SENSE_MODE 1
+#define MOTOR_BUILD_CURRENT_SENSE_MODE 2
 #endif
 
 // NTC 温度通道数: 0~4
 #define MOTOR_BUILD_NTC_SLOTS 1
 
-// #define MOTOR_BUILD_HAS_BUS_CURRENT  // BUS_CURRENT: 母线电流采样, 用于过流保护/功率估算
+#define MOTOR_BUILD_HAS_BUS_CURRENT 1  // BUS_CURRENT: 母线电流采样, 用于过流保护/功率估算
 // #define MOTOR_BUILD_HAS_PHASE_VOLTAGE  // PHASE_VOLTAGE: 相电压采样, 用于顺逆风启动/无感观测器/调制校正
 
 /* ==================== [2] 数学加速后端 ==================== */
@@ -64,13 +64,6 @@
 /* 数值后端选择：目标固件只选择一个后端，避免 fast loop 里出现运行时分支。 */
 /* 数值后端选择：默认使用 float32；打开下方宏后使用 fixed Q15。 */
 #define MOTOR_BUILD_NUMERIC_BACKEND_FIXED_Q15
-
-/* Ozone 调参门面按场景裁剪。未开启时不编入影子字段，节省 RAM/符号表噪声。 */
-// #define MOTOR_BUILD_ENABLE_OZONE_TUNING
-// #define MOTOR_BUILD_TUNING_ENABLE_CURRENT_LOOP
-// #define MOTOR_BUILD_TUNING_ENABLE_SPEED_LOOP
-// #define MOTOR_BUILD_TUNING_ENABLE_LIMITS
-// #define MOTOR_BUILD_TUNING_ENABLE_OBSERVER
 
 /* ==================== [3] 控制拓扑能力 (FOC vs 方波/六步换相) ====================
  * 二选一/可共存, 编译期裁切代码:
@@ -87,7 +80,7 @@
 
 /* ==================== [4] 角度源 / 观测器 / 启动 ==================== */
 // #define MOTOR_BUILD_ENABLE_SENSOR  // SENSOR: 有感角度源(编码器/HALL/ABZ 等), 关闭后不编译有感反馈链
-#define MOTOR_BUILD_ENABLE_IF_STARTUP  // IF_STARTUP: I/F 对齐与开环强拖启动, 可与 SMO 组合, HFI/SENSOR 启动固件可关闭
+// #define MOTOR_BUILD_ENABLE_IF_STARTUP  // IF_STARTUP: I/F 对齐与开环强拖启动, 可与 SMO 组合, HFI/SENSOR 启动固件可关闭
 // #define MOTOR_BUILD_ENABLE_SMO  // SMO: 滑模观测器(Sliding Mode Observer), 无感 FOC 核心算法
 // #define MOTOR_BUILD_ENABLE_HFI  // HFI: 高频注入法, 当前仅占位; 注入/解调完成前 MotorCfg 选择 HFI 会被拒绝
 // #define MOTOR_BUILD_ENABLE_NONLINEAR_FLUX  // NONLINEAR_FLUX: 非线性磁链观测器, 中高速无感方案
@@ -154,8 +147,16 @@
 #endif
 
 /* ==================== [10] 调试接口 / 诊断 ==================== */
-// #define MOTOR_BUILD_ENABLE_DANGEROUS_TEST_API  // 危险测试接口: 强制 PWM 输出、电流注入等, 仅调试阶段使用, 量产固件应关闭
-// #define MOTOR_BUILD_ENABLE_TICK_PROFILING  // Tick profiling: 统计每个控制 tick 的核心/ISR 耗时与超预算次数
+// Debug test slices are intentionally independent. Keep all disabled in production builds.
+// #define MOTOR_BUILD_ENABLE_DEBUG_PWM_MANUAL
+// #define MOTOR_BUILD_ENABLE_DEBUG_VF_CONTROL
+// #define MOTOR_BUILD_ENABLE_DEBUG_CURRENT_LOCK
+// #define MOTOR_BUILD_ENABLE_DEBUG_IF_CONTROL
+#define MOTOR_BUILD_ENABLE_DEBUG_IF_SMO_OBSERVER
+// #define MOTOR_BUILD_ENABLE_DEBUG_IF_HFI_OBSERVER
+// #define MOTOR_BUILD_ENABLE_DEBUG_HFI_OBSERVER
+
+// #define MOTOR_BUILD_ENABLE_TICK_PROFILING  // Tick  profiling: 统计每个控制 tick 的核心/ISR 耗时与超预算次数
 // #define MOTOR_BUILD_ENABLE_ISR_LOAD_DIAGNOSTIC  // ISR 负载诊断: 进入独立诊断状态, 仅用于确认快中断是否饿住主循环
 
 /* 控制 MotorConfigFaultDetailToString 是否编译到固件:

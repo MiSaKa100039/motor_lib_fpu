@@ -37,6 +37,11 @@
 
 #pragma once
 
+#include "../../Public/Motor_Features.h"
+#if LIB_MOTOR_NUMERIC_BACKEND_FIXED_Q15
+#include "../../Core/Numeric/Motor_FixedNumeric.h"
+#endif
+
 #include <stdint.h>
 #include <cmath>
 #include <algorithm>
@@ -50,15 +55,32 @@ public:
     AngleGenerator() = default;
 
     /* 记录控制频率/极对数 (用于日志/验证), 重置所有内部状态 */
-    void init(float freq_hz, uint8_t pole_pairs = 1)
+    void init(float freq_hz, uint8_t pole_pairs = 1, float speed_base_rpm = 1.0f)
     {
         freq_hz_ = freq_hz;
         pole_pairs_ = (pole_pairs == 0U) ? 1U : pole_pairs;
+#if LIB_MOTOR_NUMERIC_BACKEND_FIXED_Q15
+        configureFixedScale(speed_base_rpm);
+#else
+        (void)speed_base_rpm;
+#endif
         reset();
     }
 
     /* 清零: current_rpm=0, angle=0, 标记为首次调用 (下次 setTargetSpeed 重新计算 ramp) */
-    void reset() { current_rpm_ = 0.0f; angle_ = 0.0f; first_call_ = true; }
+    void reset()
+    {
+        current_rpm_ = 0.0f;
+        angle_ = 0.0f;
+        first_call_ = true;
+#if LIB_MOTOR_NUMERIC_BACKEND_FIXED_Q15
+        target_speed_q15_ = 0;
+        current_speed_q15_ = 0;
+        speed_step_q15_per_tick_ = 0U;
+        angle_phase_ = 0U;
+        first_call_q15_ = true;
+#endif
+    }
 
     /*
      * 设置目标转速和加速时间
@@ -123,6 +145,88 @@ public:
     float getAngle() const    { return angle_; }       // 当前开环电角度 (rad)
     float getSpeedRPM() const { return current_rpm_; } // 当前斜坡转速 (RPM)
 
+#if LIB_MOTOR_NUMERIC_BACKEND_FIXED_Q15
+    /*
+     * Q15 速度斜坡入口:
+     *   rpm_q15: 机械转速 / speed_base_rpm 的 Q15 表示
+     *   ramp_ticks: 从 0 斜升到目标所需控制周期数; 0/1 表示瞬时到达
+     */
+    void setTargetSpeedQ15(FixedNumeric::q15_t rpm_q15, uint32_t ramp_ticks)
+    {
+        setTargetSpeedQ15(rpm_q15, ramp_ticks, calculateSpeedStepQ15(rpm_q15, ramp_ticks));
+    }
+
+    void setTargetSpeedQ15(FixedNumeric::q15_t rpm_q15,
+                           uint32_t ramp_ticks,
+                           uint32_t speed_step_q15_per_tick)
+    {
+        target_speed_q15_ = rpm_q15;
+        if (first_call_q15_)
+        {
+            current_speed_q15_ = 0;
+            speed_step_q15_per_tick_ =
+                (ramp_ticks > 1U) ? clampSpeedStepQ15(speed_step_q15_per_tick) : 0U;
+            first_call_q15_ = false;
+        }
+    }
+
+    /* Q15 后端每 tick 调用; 只做整数 ramp 与相位累加。 */
+    void updateQ15()
+    {
+        if (speed_step_q15_per_tick_ > 0U)
+        {
+            const int32_t error =
+                static_cast<int32_t>(target_speed_q15_) -
+                static_cast<int32_t>(current_speed_q15_);
+            const uint32_t error_abs =
+                (error < 0) ? static_cast<uint32_t>(-error)
+                            : static_cast<uint32_t>(error);
+            if (error_abs <= speed_step_q15_per_tick_)
+            {
+                current_speed_q15_ = target_speed_q15_;
+            }
+            else
+            {
+                const int32_t next =
+                    static_cast<int32_t>(current_speed_q15_) +
+                    ((error > 0) ? static_cast<int32_t>(speed_step_q15_per_tick_)
+                                 : -static_cast<int32_t>(speed_step_q15_per_tick_));
+                current_speed_q15_ = FixedNumeric::saturateQ15(next);
+            }
+        }
+        else
+        {
+            current_speed_q15_ = target_speed_q15_;
+        }
+
+        angle_phase_ = static_cast<FixedNumeric::phase_u32_t>(
+            angle_phase_ + phaseStepFromSpeedQ15(current_speed_q15_));
+    }
+
+    FixedNumeric::phase_u32_t getAnglePhase() const { return angle_phase_; }
+    FixedNumeric::q15_t getSpeedQ15() const { return current_speed_q15_; }
+
+    static uint32_t calculateSpeedStepQ15(FixedNumeric::q15_t rpm_q15,
+                                          uint32_t ramp_ticks)
+    {
+        if (ramp_ticks <= 1U)
+        {
+            return 0U;
+        }
+
+        const uint32_t target_abs =
+            (rpm_q15 < 0)
+                ? static_cast<uint32_t>(-static_cast<int32_t>(rpm_q15))
+                : static_cast<uint32_t>(rpm_q15);
+        uint32_t step = (target_abs + ramp_ticks - 1U) / ramp_ticks;
+        if (step == 0U && target_abs > 0U)
+        {
+            step = 1U;
+        }
+        return clampSpeedStepQ15(step);
+    }
+#endif
+
 private:
     float freq_hz_    = 10000.0f;   // 控制频率 (Hz), 仅记录用
     float target_rpm_ = 0.0f;       // 目标转速 (RPM)
@@ -134,6 +238,61 @@ private:
 
     static constexpr float PI     = 3.14159265358979323846f;
     static constexpr float TWO_PI = 6.28318530717958647692f;
+
+#if LIB_MOTOR_NUMERIC_BACKEND_FIXED_Q15
+    void configureFixedScale(float speed_base_rpm)
+    {
+        phase_step_q16_per_speed_q15_ = 0U;
+        if (!(freq_hz_ > 0.0f) || !(speed_base_rpm > 0.0f))
+        {
+            return;
+        }
+
+        /*
+         * phase_step = speed_q15 * speed_base_rpm * pole_pairs / 60 / freq_hz * 2^32 / 2^15
+         * 保存为 Q16 系数，tick 内只需一次 32x32->64 乘法和右移。
+         */
+        const float scaled =
+            speed_base_rpm *
+            static_cast<float>(pole_pairs_) *
+            8589934592.0f /
+            (60.0f * freq_hz_);
+        if (scaled >= 4294967040.0f)
+        {
+            phase_step_q16_per_speed_q15_ = 0xFFFFFFFFUL;
+        }
+        else if (scaled > 0.0f)
+        {
+            phase_step_q16_per_speed_q15_ =
+                static_cast<uint32_t>(scaled + 0.5f);
+        }
+    }
+
+    FixedNumeric::phase_u32_t phaseStepFromSpeedQ15(FixedNumeric::q15_t speed_q15) const
+    {
+        const int32_t speed = static_cast<int32_t>(speed_q15);
+        const uint32_t speed_abs =
+            (speed < 0) ? static_cast<uint32_t>(-speed)
+                        : static_cast<uint32_t>(speed);
+        const uint32_t step = static_cast<uint32_t>(
+            (static_cast<uint64_t>(speed_abs) *
+             static_cast<uint64_t>(phase_step_q16_per_speed_q15_)) >> 16U);
+        return (speed < 0) ? static_cast<FixedNumeric::phase_u32_t>(0UL - step)
+                           : step;
+    }
+
+    static uint32_t clampSpeedStepQ15(uint32_t step)
+    {
+        return (step > 32767U) ? 32767U : step;
+    }
+
+    FixedNumeric::q15_t target_speed_q15_ = 0;
+    FixedNumeric::q15_t current_speed_q15_ = 0;
+    uint32_t speed_step_q15_per_tick_ = 0U;
+    FixedNumeric::phase_u32_t angle_phase_ = 0U;
+    uint32_t phase_step_q16_per_speed_q15_ = 0U;
+    bool first_call_q15_ = true;
+#endif
 };
 
 } // namespace Lib_Motor

@@ -3,7 +3,6 @@ add_library(lca039_motor STATIC)
 target_sources(lca039_motor PRIVATE
     Core/API/Motor_API.cpp
     Core/Debug/Motor_ManagerDebug.cpp
-    Core/Debug/Motor_OzoneTuning.cpp
     Core/Feature/Motor_FeatureRegistry.cpp
     Core/FSM/Motor_FSM.cpp
     Core/FSM/AngleFSM/Motor_AngleFSM.cpp
@@ -21,7 +20,7 @@ target_sources(lca039_motor PRIVATE
     Core/Monitor/Motor_ManagerMonitor.cpp
     Core/Numeric/Motor_FixedNumeric.cpp
     Core/RunPlan/Motor_RunPlan.cpp
-    Core/Runtime/Motor_ManagerRuntime.cpp
+    Core/Runtime/Motor_Runtime.cpp
     Core/Safety/Motor_CommandGuard.cpp
     Core/Safety/Motor_ConfigCheck.cpp
     Core/Safety/Motor_FaultDetailString.cpp
@@ -29,20 +28,22 @@ target_sources(lca039_motor PRIVATE
     Core/Safety/Motor_RuntimeMonitor.cpp
     Core/Safety/Motor_SignalHealth.cpp
     Core/Sampling/Motor_ManagerSampling.cpp
-    Core/Sampling/Motor_SingleShunt.cpp
+    Core/Sampling/Motor_NtcLookup.h
     Core/Startup/Motor_ManagerStartup.cpp
-    Core/Startup/FlyingStart/Motor_FlyingStartRoutine.cpp)
+    Core/Startup/FlyingStart/Motor_FlyingStartRoutine.cpp
+    Control/Utils/FocMath.h
+    Control/Utils/LowPassFilter.h
+    Control/Utils/MotorPIAutoTune.h
+    Control/Utils/PidController.h
+    Public/Motor_NtcLookupTable.h
+    Public/Motor_NtcLookupTables_User.h)
 
 target_include_directories(lca039_motor PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${CMAKE_CURRENT_SOURCE_DIR}/Public
-    ${CMAKE_CURRENT_SOURCE_DIR}/Common/Filter
-    ${CMAKE_CURRENT_SOURCE_DIR}/Common/Limit
-    ${CMAKE_CURRENT_SOURCE_DIR}/Common/Math
     ${CMAKE_CURRENT_SOURCE_DIR}/Control
     ${CMAKE_CURRENT_SOURCE_DIR}/Control/Utils
     ${CMAKE_CURRENT_SOURCE_DIR}/Observer
-    ${CMAKE_CURRENT_SOURCE_DIR}/Safety/Basic
     ${CMAKE_SOURCE_DIR}/Platform/Motor
     ${CMAKE_SOURCE_DIR}/Platform/Motor/BuildCfg
     ${CMAKE_SOURCE_DIR}/Platform/Motor/MotorCfg

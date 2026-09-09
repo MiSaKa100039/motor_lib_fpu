@@ -105,6 +105,7 @@ void Motor_SafetyFSM::latchFault(MotorManager& m, Fault fault)
 void Motor_SafetyFSM::clearLatchedFault(MotorManager& m)
 {
     m.fault_ = Fault::NONE;                      // 清除故障掩码
+    m.clearRuntimeFaultDetail();
     m.safety_state_ = SafetyState::CLEAR;        // 安全状态恢复清除
     m.command_state_ = CommandState::IDLE;       // 命令状态恢复
     m.stream_state_ = StreamState::NONE;         // 流状态恢复
@@ -223,13 +224,17 @@ void Motor_SafetyFSM::enterFaultLatched(MotorManager& m)
     m.stall_restart_pending_ = false;
     m.stall_restart_wait_ticks_ = 0U;
 #endif
+#if LIB_MOTOR_ENABLE_IF_STARTUP
+    m.startup_restart_pending_ = false;
+    m.startup_restart_wait_ticks_ = 0U;
+#endif
 
     // ── [6] 软件端清零 PWM 占空比 ──
     // 必须在硬件关断前先清零软件端, 防止 MotorManager 在同一个 tick
     // 的后续步骤 (如 runControlLoop) 中写入新的 duty 值到硬件
-    m.ctx_.duty_a = 0.0f;
-    m.ctx_.duty_b = 0.0f;
-    m.ctx_.duty_c = 0.0f;
+    m.ctx_.duty_a = 0;
+    m.ctx_.duty_b = 0;
+    m.ctx_.duty_c = 0;
 
     // ── [7] 硬件端关断 PWM 输出 ──
     // 调用 BSP 层 pwm_disable() → MOE=0, 三相输出 Hi-Z

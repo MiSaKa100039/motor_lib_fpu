@@ -27,6 +27,18 @@ struct ObserverEstimate
     bool valid = false;              // valid_ticks >= lock_ticks_ 时认定为有效
 };
 
+// fixed-q15 后端的观测器内部输出；转换到 float 只允许在 monitor/API 读取点发生。
+struct ObserverEstimateQ15
+{
+    uint32_t angle_phase = 0U;        // 电角度 phase_u32, 0..2^32 映射 0..2π
+    int16_t speed_rpm_q15 = 0;        // 机械转速 / speed_base_rpm
+    int16_t pll_error_q15 = 0;        // PLL 角度误差, ±32768 映射 ±π
+    int16_t signal_level_q15 = 0;     // 反电势信号 / voltage_base
+    int16_t quality_q15 = 0;          // 质量分 [0,1]
+    uint16_t valid_ticks = 0U;
+    bool valid = false;
+};
+
 // HFI 注入电压指令 (叠加到 FOC d/q 轴电压上)
 struct HfiInjectionCommand
 {

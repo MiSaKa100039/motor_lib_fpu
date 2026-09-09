@@ -4,7 +4,7 @@
  * 文件层级: Safety/RuntimeMonitor
  *
  * 职责: 每个控制 tick 检查运行时物理量是否超出安全阈值
- *   1. 过流检测: 三相电流中最大值超过 max_current_a -> Fault::OVERCURRENT
+ *   1. 过流检测: 相线或母线电流超过对应软件阈值 -> Fault::OVERCURRENT
  *   2. 过压检测: 母线电压超过 over_voltage_v -> Fault::OVERVOLT
  *   3. 欠压检测: 初始化采样完成后母线电压低于 under_voltage_v -> Fault::UNDERVOLT
  *   4. 过温检测: 任一使能的 NTC 超过 over_temp_c -> Fault::OVERTEMP
@@ -22,9 +22,10 @@ namespace Lib_Motor
 /*
  * check -- 运行时安全阈值检查 (每 tick 调用)
  *
- * @param limits  -- 限制参数 (max_current_a/over_voltage_v/under_voltage_v)
+ * @param limits  -- 限制参数 (max_phase_current_a/max_bus_current_a/over_voltage_v/under_voltage_v)
  * @param sensor  -- 传感器配置 (NTC 数量/阈值)
  * @param ia,ib,ic -- 三相电流 (已滤波)
+ * @param i_bus   -- 母线电流
  * @param v_bus   -- 母线电压
  * @param temp    -- NTC 温度数组
  * @param state   -- 当前 FSM 状态 (INIT/ADC_CAL 由调用方跳过)
@@ -33,26 +34,50 @@ namespace Lib_Motor
 void MotorRuntimeMonitor::check(const MotorLimitParam& limits,
                                 const MotorSensorParam& sensor,
                                 float ia, float ib, float ic,
-                                float v_bus, const float temp[4],
-                                State state, Fault* fault)
+                                float i_bus, float v_bus, const float temp[4],
+                                State state, Fault* fault,
+                                MotorRuntimeFaultDetail* fault_detail)
 {
     if (fault == nullptr) return;
+    (void)state;
 
     Fault current_fault = Fault::NONE;
 
-    // [A] 过流检测: 取三相电流绝对值的最大值
+    // [A] 相线软件过流检测: 取三相电流绝对值的最大值
     float max_current = fabsf(ia);
     if (fabsf(ib) > max_current) max_current = fabsf(ib);
     if (fabsf(ic) > max_current) max_current = fabsf(ic);
 
-    if (max_current > limits.max_current_a)
+    if (max_current > limits.max_phase_current_a)
     {
         current_fault = static_cast<Fault>(
             static_cast<uint16_t>(current_fault) |
             static_cast<uint16_t>(Fault::OVERCURRENT));
+        if (fault_detail != nullptr &&
+            *fault_detail == MotorRuntimeFaultDetail::NONE)
+        {
+            *fault_detail = MotorRuntimeFaultDetail::SOFTWARE_PHASE_OVERCURRENT;
+        }
     }
 
-    // [B] 过压检测
+#if MOTOR_BUILD_HAS_BUS_CURRENT
+    // [B] 母线软件过流检测: 仅在 MotorCfg 声明确有母线电流采样时生效。
+    if (sensor.has_bus_current && fabsf(i_bus) > limits.max_bus_current_a)
+    {
+        current_fault = static_cast<Fault>(
+            static_cast<uint16_t>(current_fault) |
+            static_cast<uint16_t>(Fault::OVERCURRENT));
+        if (fault_detail != nullptr &&
+            *fault_detail == MotorRuntimeFaultDetail::NONE)
+        {
+            *fault_detail = MotorRuntimeFaultDetail::SOFTWARE_BUS_OVERCURRENT;
+        }
+    }
+#else
+    (void)i_bus;
+#endif
+
+    // [C] 过压检测
     if (v_bus > limits.over_voltage_v)
     {
         current_fault = static_cast<Fault>(
@@ -60,7 +85,7 @@ void MotorRuntimeMonitor::check(const MotorLimitParam& limits,
             static_cast<uint16_t>(Fault::OVERVOLT));
     }
 
-    // [C] 欠压在 STOP/STOPPING/RUN 均锁故障, 防止无母线上电后静默等待到 start() 才报错。
+    // [D] 欠压在 STOP/STOPPING/RUN 均锁故障, 防止无母线上电后静默等待到 start() 才报错。
     if (v_bus < limits.under_voltage_v)
     {
         current_fault = static_cast<Fault>(
@@ -68,7 +93,7 @@ void MotorRuntimeMonitor::check(const MotorLimitParam& limits,
             static_cast<uint16_t>(Fault::UNDERVOLT));
     }
 
-    // [D] 过温检测: 遍历所有使能的 NTC 通道
+    // [E] 过温检测: 遍历所有使能的 NTC 通道
     for (uint8_t i = 0; i < MOTOR_BUILD_NTC_SLOTS; ++i)
     {
         if (!sensor.ntc[i].enabled) continue;

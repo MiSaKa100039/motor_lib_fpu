@@ -105,8 +105,8 @@ inline DutyAbc svpwmVbusNormalized(const Ab& voltage)
     const q15_t betaTerm = multiplyQ15(voltage.beta, kSqrt3Over2);
 
     const q15_t phaseA = voltage.alpha;
-    const q15_t phaseB = subtractQ15(static_cast<q15_t>(-halfAlpha), betaTerm);
-    const q15_t phaseC = addQ15(static_cast<q15_t>(-halfAlpha), betaTerm);
+    const q15_t phaseB = addQ15(static_cast<q15_t>(-halfAlpha), betaTerm);
+    const q15_t phaseC = subtractQ15(static_cast<q15_t>(-halfAlpha), betaTerm);
 
     const q15_t maximum = (phaseA > phaseB) ? ((phaseA > phaseC) ? phaseA : phaseC)
                                             : ((phaseB > phaseC) ? phaseB : phaseC);
@@ -120,27 +120,21 @@ inline DutyAbc svpwmVbusNormalized(const Ab& voltage)
         saturateDutyQ15(static_cast<std::int32_t>(kQ15Half) + addQ15(phaseC, offset))};
 }
 
-class FixedPiController
+inline DutyAbc spwmVbusNormalized(const Ab& voltage)
 {
-public:
-    void configure(float kp,
-                   float ki,
-                   float inputBase,
-                   float outputBase,
-                   float dt,
-                   float outputLimit,
-                   bool resetIntegrator);
+    constexpr q15_t kSqrt3Over2 = 28378;
+    const q15_t halfAlpha = static_cast<q15_t>(voltage.alpha >> 1);
+    const q15_t betaTerm = multiplyQ15(voltage.beta, kSqrt3Over2);
 
-    q15_t update(q15_t error, bool holdIntegral = false);
-    void reset();
-    void decayIntegral(float factor);
+    const q15_t phaseA = voltage.alpha;
+    const q15_t phaseB = addQ15(static_cast<q15_t>(-halfAlpha), betaTerm);
+    const q15_t phaseC = subtractQ15(static_cast<q15_t>(-halfAlpha), betaTerm);
 
-private:
-    q15_t kpQ15_ = 0;
-    q15_t kiPerTickQ15_ = 0;
-    q15_t outputLimitQ15_ = 0;
-    std::int32_t integratorQ30_ = 0;
-};
+    return DutyAbc{
+        saturateDutyQ15(static_cast<std::int32_t>(kQ15Half) + phaseA),
+        saturateDutyQ15(static_cast<std::int32_t>(kQ15Half) + phaseB),
+        saturateDutyQ15(static_cast<std::int32_t>(kQ15Half) + phaseC)};
+}
 
 } // namespace FixedNumeric
 } // namespace Lib_Motor

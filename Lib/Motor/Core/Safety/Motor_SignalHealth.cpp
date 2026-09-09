@@ -9,7 +9,7 @@
 #include "Motor_SignalHealth.h"
 
 #include "../Manager/Motor_Manager.h"
-#include "../../Common/Math/FocMath.h"
+#include "../../Control/Utils/FocMath.h"
 
 #include <cmath>
 
@@ -22,12 +22,14 @@ namespace
 /*
  * 将任意角度折返到 [-PI, PI] 区间, 便于做差值比较。
  */
+#if LIB_MOTOR_ENABLE_SENSOR || defined(MOTOR_BUILD_ENABLE_REDUNDANT_SENSOR)
 float wrapSignedAngle(float angle)
 {
     while (angle > PI) angle -= TWO_PI;
     while (angle < -PI) angle += TWO_PI;
     return angle;
 }
+#endif
 
 } // namespace
 
@@ -40,6 +42,7 @@ float wrapSignedAngle(float angle)
  *   [3] 输出轴传感器
  *   [4] 派生量: 冗余角误差、传动挠度
  */
+#if LIB_MOTOR_ENABLE_SENSOR
 void MotorSignalHealth::updatePositionSensors(MotorManager& m)
 {
     const bool primary_was_ready = m.ctx_.sensor_ready;
@@ -182,9 +185,10 @@ void MotorSignalHealth::updatePositionSensors(MotorManager& m)
             ? wrapSignedAngle(
                 m.ctx_.angle_mech_sensor / m.config_.position.transmission_ratio -
                 m.ctx_.angle_mech_output_sensor)
-            : 0.0f;
+    : 0.0f;
 #endif
 }
+#endif
 
 /*
  * 检查主传感器与冗余传感器的一致性。

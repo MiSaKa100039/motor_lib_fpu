@@ -23,24 +23,54 @@ namespace Lib_Motor
 bool MotorCommandGuard::isDebugOrCalib(Mode mode)
 {
 
-    if (mode == Mode::DEBUG_PWM_MANUAL ||
-        mode == Mode::DEBUG_CURRENT_LOCK ||
-        mode == Mode::DEBUG_HFI_OBSERVER ||
-        mode == Mode::DEBUG_VF_DRAG)
+#if LIB_MOTOR_ENABLE_DEBUG_PWM_MANUAL
+    if (mode == Mode::DEBUG_PWM_MANUAL)
     {
         return true;
     }
+#endif
 
+#if LIB_MOTOR_ENABLE_DEBUG_CURRENT_LOCK
+    if (mode == Mode::DEBUG_CURRENT_LOCK)
+    {
+        return true;
+    }
+#endif
+
+#if LIB_MOTOR_ENABLE_DEBUG_HFI_OBSERVER
+    if (mode == Mode::DEBUG_HFI_OBSERVER)
+    {
+        return true;
+    }
+#endif
+
+#if LIB_MOTOR_ENABLE_DEBUG_VF_CONTROL
+    if (mode == Mode::DEBUG_VF_DRAG)
+    {
+        return true;
+    }
+#endif
+
+#if LIB_MOTOR_ENABLE_DEBUG_IF_CONTROL
     if (mode == Mode::DEBUG_IF_DRAG)
     {
         return true;
     }
+#endif
 
-    if (mode == Mode::DEBUG_IF_SMO_OBSERVER ||
-        mode == Mode::DEBUG_IF_HFI_OBSERVER)
+#if LIB_MOTOR_ENABLE_DEBUG_IF_SMO_OBSERVER
+    if (mode == Mode::DEBUG_IF_SMO_OBSERVER)
     {
         return true;
     }
+#endif
+
+#if LIB_MOTOR_ENABLE_DEBUG_IF_HFI_OBSERVER
+    if (mode == Mode::DEBUG_IF_HFI_OBSERVER)
+    {
+        return true;
+    }
+#endif
 
     return mode == Mode::CALIB_RL_IDENTIFY;
 }
@@ -90,7 +120,7 @@ Result MotorCommandGuard::validateApiModeChange(State state, Mode current_mode, 
  *   3. 传感器闭环: 反馈能力检查 (角度类/扭矩支持/速度支持)
  *   4. 速度闭环: 速度环编译检查
  *   5. 位置控制: 暂不支持
- *   6. 调试/校准: 无条件放行
+ *   6. 调试/校准: 普通直驱放行，IF+SMO shadow 需额外校验 SMO 参数
  */
 Result MotorCommandGuard::validateModeSelection(const MotorConfig& cfg, Mode mode)
 {
@@ -118,6 +148,7 @@ Result MotorCommandGuard::validateModeSelection(const MotorHardwareConfig& hardw
     base_cfg.limit = hardware.limit;
     base_cfg.sensor = hardware.sensor;
     base_cfg.position = hardware.position;
+    base_cfg.observer = algorithm.observer;
     base_cfg.control = algorithm.control;
     base_cfg.brake = algorithm.brake;
     base_cfg.identify = algorithm.identify;
@@ -189,24 +220,41 @@ case Mode::TORQUE_CONTROL:
             return Result::Ok;
         }
 
+#if LIB_MOTOR_ENABLE_DEBUG_PWM_MANUAL
         case Mode::DEBUG_PWM_MANUAL:
+#endif
+#if LIB_MOTOR_ENABLE_DEBUG_CURRENT_LOCK
         case Mode::DEBUG_CURRENT_LOCK:
+#endif
+#if LIB_MOTOR_ENABLE_DEBUG_VF_CONTROL
         case Mode::DEBUG_VF_DRAG:
+#endif
+#if LIB_MOTOR_ENABLE_DEBUG_PWM_MANUAL || LIB_MOTOR_ENABLE_DEBUG_CURRENT_LOCK || LIB_MOTOR_ENABLE_DEBUG_VF_CONTROL
             return Result::Ok;
+#endif
 
+#if LIB_MOTOR_ENABLE_DEBUG_HFI_OBSERVER
         case Mode::DEBUG_HFI_OBSERVER:
-            return hardware.sensor.current_sense_mode == CurrentSenseMode::SINGLE_SHUNT
-                       ? Result::NotSupported
-                       : Result::Ok;
-
-        case Mode::DEBUG_IF_DRAG:
-        case Mode::DEBUG_IF_SMO_OBSERVER:
             return Result::Ok;
+#endif
 
+#if LIB_MOTOR_ENABLE_DEBUG_IF_CONTROL
+        case Mode::DEBUG_IF_DRAG:
+            return Result::Ok;
+#endif
+
+#if LIB_MOTOR_ENABLE_DEBUG_IF_SMO_OBSERVER
+        case Mode::DEBUG_IF_SMO_OBSERVER:
+            return MotorConfigCheck::validSmoObserverParams(hardware.physical,
+                                                            algorithm.observer)
+                ? Result::Ok
+                : Result::InvalidParam;
+#endif
+
+#if LIB_MOTOR_ENABLE_DEBUG_IF_HFI_OBSERVER
         case Mode::DEBUG_IF_HFI_OBSERVER:
-            return hardware.sensor.current_sense_mode == CurrentSenseMode::SINGLE_SHUNT
-                       ? Result::NotSupported
-                       : Result::Ok;
+            return Result::Ok;
+#endif
 
         case Mode::CALIB_RL_IDENTIFY:
             return Result::Ok;

@@ -8,14 +8,14 @@
  * 子阶段 (RunPhase):
  *   RUN_DIRECT     — 调试直通模式 (PWM_MANUAL/CURRENT_LOCK/IF_DRAG/VF_DRAG)
  *   SENSOR_ONLY    — 有感闭环 (直接使用编码器/霍尔)
- *   ALIGNMENT      — 电流对齐 (Id 注入, 转子吸合到 0° 电角)
- *   FORCE_DRAG     — IF 开环强拖 (角度开环 + 电流闭环)
+ *   ALIGNMENT      — 辨识等非 IF 流程保留阶段
+ *   FORCE_DRAG     — IF profile 内完成对齐和开环强拖
  *   SMO_ONLY       — SMO 无感闭环
  *   HFI_ONLY       — HFI 高频注入 (当前占位, 配置检查会拒绝)
  *   FUSION         — 传感器融合 (未实现)
  *
  * 启动流程:
- *   IF + SMO 启动:    ALIGNMENT → FORCE_DRAG → SMO_ONLY
+ *   IF + SMO 启动:    FORCE_DRAG(ALIGNMENT + RAMP) → SMO_ONLY
  *   HFI + SMO 启动:   计划为 HFI_ONLY → SMO_ONLY, 当前 HFI 未实现
  *   有感启动:          SENSOR_ONLY (直接)
  */

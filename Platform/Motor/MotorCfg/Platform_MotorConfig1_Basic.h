@@ -24,7 +24,7 @@ inline void ApplyBasicConfig(Lib_Motor::MotorConfig& cfg)
     /*
      * 一阶低通滤波器时间常数 (s), 滤除 PWM 开关噪声。
      * 不能设太大, 否则相位滞后导致电流环失稳。
-     *   phase_current: 相电流 OC 触发采样 → 噪声天然低, 常数可小
+     *   phase_current: 相电流 float 监控/反馈路径的一阶低通; 当前 50us 为轻滤波。
      *   bus_current/bus_voltage: 分压器+运放 → 噪声大, 常数稍大
      */
     cfg.sensor.phase_current_lpf_tf_s = 0.00005f;
@@ -36,8 +36,7 @@ inline void ApplyBasicConfig(Lib_Motor::MotorConfig& cfg)
     /*
      * current_sensor_type: SHUNT_RESISTOR (分流电阻)
      *                      HALL_SENSOR (霍尔电流传感器)
-     * current_sense_mode:   SINGLE_SHUNT → DC-link/下桥臂单电阻两点采样重构相电流
-     *                       DUAL_SENSOR → 两个相电流传感器 (Iu, Iv), Iw 计算
+     * current_sense_mode:   DUAL_SENSOR → 两个相电流传感器 (Iu, Iv), Iw 计算
      *                       TRIPLE_SENSOR → 三个相电流传感器
      * has_bus_current:      是否有独立母线电流采样电阻
      *
@@ -51,10 +50,8 @@ inline void ApplyBasicConfig(Lib_Motor::MotorConfig& cfg)
      * bus_shunt_resistor/bus_amp_gain: 仅 has_bus_current=true 时使用
     */
     cfg.sensor.current_sensor_type = Lib_Motor::CurrentSensorType::SHUNT_RESISTOR;
-    // M0 低成本 DC-link/下桥臂单电阻板使用 SINGLE_SHUNT，并要求 MOTOR_BUILD_CURRENT_SENSE_MODE=1。
-    // 单电阻物理上位于母线电流路径，但这里作为 FOC 相电流重构反馈使用。
-    cfg.sensor.current_sense_mode = Lib_Motor::CurrentSenseMode::SINGLE_SHUNT;
-    cfg.sensor.has_bus_current = false;
+    cfg.sensor.current_sense_mode = Lib_Motor::CurrentSenseMode::DUAL_SENSOR;
+    cfg.sensor.has_bus_current = true;
 
     cfg.sensor.invert_phase_current_u = true;
     cfg.sensor.invert_phase_current_v = true;
@@ -62,10 +59,10 @@ inline void ApplyBasicConfig(Lib_Motor::MotorConfig& cfg)
 
     cfg.sensor.hall_sensitivity_mV_per_A = 4.4f;
 
-    // SINGLE_SHUNT 下这两个参数用于 raw pair 到 ia/ib/ic 的换算，是相电流重构反馈标定。
-    cfg.sensor.phase_shunt_resistor = 0.005f;
+    cfg.sensor.phase_shunt_resistor = 0.001f;
     cfg.sensor.phase_amp_gain = 20.0f;
-    // bus_shunt_* 仅用于独立 i_bus 采样；has_bus_current=false 时不参与单电阻重构。
+
+    // bus_shunt_* 用于 OPA2/ADC14 母线电流采样和母线软件过流判断。
     cfg.sensor.bus_shunt_resistor = 0.0001f;
     cfg.sensor.bus_amp_gain = 20.0f;
 
@@ -75,8 +72,12 @@ inline void ApplyBasicConfig(Lib_Motor::MotorConfig& cfg)
      * has_bus_voltage: false 时用额定电压代替, 影响调制比和过压保护
      */
     cfg.sensor.has_bus_voltage = true;
-    cfg.sensor.vbus_r_up = 470000.0f;
-    cfg.sensor.vbus_r_down = 100000.0f;
+
+    // cfg.sensor.vbus_r_up = 470000.0f;
+    // cfg.sensor.vbus_r_down = 100000.0f;
+
+    cfg.sensor.vbus_r_up = 220000.0f;
+    cfg.sensor.vbus_r_down = 10000.0f;
 
     cfg.sensor.has_phase_voltage = false;
     cfg.sensor.vphase_r_up = 300000.0f;
@@ -94,7 +95,7 @@ inline void ApplyBasicConfig(Lib_Motor::MotorConfig& cfg)
      *   beta:         NTC 热敏指数 (B 值, K)
      *   over_temp_c:  过热保护阈值 (°C)
      */
-    cfg.sensor.ntc[0].enabled = false;
+    cfg.sensor.ntc[0].enabled = true;
     cfg.sensor.ntc[0].topology = Lib_Motor::NtcTopology::LOW_SIDE_NTC;
     cfg.sensor.ntc[0].r_series = 10000.0f;
     cfg.sensor.ntc[0].r_25 = 10000.0f;
@@ -118,7 +119,7 @@ inline void ApplyBasicConfig(Lib_Motor::MotorConfig& cfg)
      *                - Iq 软上限取自 configuredIqLimit() 三级回退:
      *                  (1) cfg.motion.max_iq_ref_a > 0 → 优先用 max_iq_ref_a
      *                  (2) max_iq_ref_a = 0 时回退用 rated_current
-     *                  (3) rated_current = 0 时回退用 limit.max_current_a (硬保护)
+     *                  (3) rated_current = 0 时回退用 limit.max_phase_current_a (相线软件保护)
      *                - 本工程 max_iq_ref_a=5.0f 已填, rated_current 不参与日常限幅;
      *                  仅当 max_iq_ref_a=0 时作为兜底, 保留字段不删除。
      * rated_voltage: 电机额定电压 (V), 不是实时母线电压
@@ -133,15 +134,15 @@ inline void ApplyBasicConfig(Lib_Motor::MotorConfig& cfg)
      *                若 LCR 多个转子位置测得 L 差异明显, 通用 Ls 建议填较小值作为保守整定;
      *                需要更高性能时再手动区分 Ld/Lq。本轮自动 RL 不做转子角度扫描。
      */
-    cfg.physical.pole_pairs = 7;
-    cfg.physical.rated_current = 300.0f;
-    cfg.physical.rated_voltage = 72.0f;
+    cfg.physical.pole_pairs = 4;
+    cfg.physical.rated_current = 30.0f;
+    cfg.physical.rated_voltage = 24.0f;
     /* === 电机参数固化配置值 (=0 表示未知) ===
      * *_measured:
      *   仪器、datasheet、反拖台架等外部方式确认后的手动测量固化值。
      *
      * *_learned_cfg:
-     *   上次 CMD=1 (USER_MOTOR_TEST_RL_IDENTIFY) 或 Ke 辨识得到 *_identified 后,
+     *   上次调用 startRLIdentification() 或 Ke 辨识得到 *_identified 后,
      *   用户人工确认并回填到 cfg 的自动辨识固化值。它与 measured 分开保存,
      *   方便看清当前工程到底在用"仪器测量值"还是"自动辨识回填值"。
      *
@@ -152,20 +153,20 @@ inline void ApplyBasicConfig(Lib_Motor::MotorConfig& cfg)
      *   MEASURED:    只使用 measured, 为 0 时 effective 也为 0。
      *   LEARNED_CFG: 只使用 learned_cfg, 为 0 时 effective 也为 0; 可用于强制跳过 measured。
      */
-    cfg.physical.rs_ohm_measured         = 0.0f;
-    cfg.physical.ls_h_measured           = 0.0f;
+    cfg.physical.rs_ohm_measured         = 0.0275f;
+    cfg.physical.ls_h_measured           = 0.000038f;
     cfg.physical.ld_h_measured           = 0.0f; // D 轴电感手动测量值, 普通场景保持 0 并使用 Ls
     cfg.physical.lq_h_measured           = 0.0f; // Q 轴电感手动测量值, 普通场景保持 0 并使用 Ls
     cfg.physical.ke_v_per_rad_s_measured = 0.0f; // Ke 可由反拖台架或 Ke 辨识确认后回填
 
-    cfg.physical.rs_ohm_learned_cfg         = 0.15f; // 单位 Ω
-    cfg.physical.ls_h_learned_cfg           = 0.000026f;      // 单位 H
+    cfg.physical.rs_ohm_learned_cfg         = 0.0275f; // 单位 Ω
+    cfg.physical.ls_h_learned_cfg           = 0.000038f;      // 单位 H
     cfg.physical.ke_v_per_rad_s_learned_cfg = 0.0f;
     cfg.physical.electrical_param_source = Lib_Motor::MotorPhysicalParamSource::MEASURED;   //仅使用仪器测量值
 
     /* ===================== [7] RL 辨识约束参数 ===================== */
     /*
-     * 这些参数只约束 CMD=1 (USER_MOTOR_TEST_RL_IDENTIFY) 的静态 R/L 辨识流程,
+     * 这些参数只约束 startRLIdentification() 的静态 R/L 辨识流程,
      * 不代表电机最终参数。辨识成功后仍需读取 *_identified, 确认后人工回填到
      * 上面的 *_learned_cfg 或 *_measured 字段, 下次冷启动才作为固化值使用。
      *
@@ -206,7 +207,7 @@ inline void ApplyBasicConfig(Lib_Motor::MotorConfig& cfg)
      * persistent_flash_signature: 判断 flash 记录是否属于当前电机/配置。
      *
      * 当前 BSP flash_* 回调为 nullptr, 因此保持 false/0, 不做自动保存/加载。
-     * 若没有仪器测量, 调试时用 CMD=1 (USER_MOTOR_TEST_RL_IDENTIFY) 辨识, 再把确认值人工回填到上面的
+     * 若没有仪器测量, 调试时用 startRLIdentification() 辨识, 再把确认值人工回填到上面的
      * *_learned_cfg 字段, 并把 electrical_param_source 设为 AUTO 或 LEARNED_CFG。
      */
     cfg.persistent_enabled            = false;
@@ -217,16 +218,18 @@ inline void ApplyBasicConfig(Lib_Motor::MotorConfig& cfg)
     /* ===================== [8] 硬保护限值 ===================== */
     /*
      * 以下是驱动运行保护值, 不应直接照抄电机额定值。
-     * max_current_a:   过流立即锁故障, 首次验证采样方向时须显著降低
+     * max_phase_current_a: 相线软件过流立即锁故障, 首次验证采样方向时须显著降低
+     * max_bus_current_a:   母线软件过流立即锁故障, 独立于相线阈值
      * max_speed_rpm:   控制目标 / 保护的机械速度上限
      * over_voltage_v:  母线过压阈值, 高于正常母线但低于功率器件耐压
      * under_voltage_v: 初始化采样完成后母线低于此值立即锁欠压故障
      * max_duty_cycle:  调制比上限, 留出 ADC 采样和死区余量
      */
-    cfg.limit.max_current_a = 100.0f;
+    cfg.limit.max_phase_current_a = 50.0f;
+    cfg.limit.max_bus_current_a = 50.0f;
     cfg.limit.max_speed_rpm = 5000.0f;
-    cfg.limit.over_voltage_v = 72.0f;
-    cfg.limit.under_voltage_v = 24.0f;
+    cfg.limit.over_voltage_v = 24.0f;
+    cfg.limit.under_voltage_v = 8.0f;
     cfg.limit.max_duty_cycle = 0.90f;
 }
 

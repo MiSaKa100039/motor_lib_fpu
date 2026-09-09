@@ -109,10 +109,7 @@ switch (state)
                 {
                     m.config_.hal->pwm_disable();
                 }
-                if (m.config_.hal->set_duty != nullptr)
-                {
-                    m.config_.hal->set_duty(0.0f, 0.0f, 0.0f);
-                }
+                m.writePwmZeroOutputs();
                 m.config_.hal->mechanical_brake_engage();
                 m.stop_state_ = StopState::MECHANICAL_BRAKE_ENGAGED;
                 return;
@@ -132,10 +129,7 @@ switch (state)
             {
                 m.config_.hal->pwm_disable();                  // 关断 PWM
             }
-            if (m.config_.hal->set_duty != nullptr)
-            {
-                m.config_.hal->set_duty(0.0f, 0.0f, 0.0f);    // 软件端清零占空比
-            }
+            m.writePwmZeroOutputs();                           // 软件端清零占空比
             return;
     }
 }

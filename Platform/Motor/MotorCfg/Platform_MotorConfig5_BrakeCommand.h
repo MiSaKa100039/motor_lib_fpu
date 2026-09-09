@@ -32,6 +32,7 @@ inline void ApplyBrakeAndCommandConfig(Lib_Motor::MotorConfig& cfg)
     cfg.brake.allow_low_side_brake = true;    // 允许三相下桥臂短路制动 (能量在绕组内耗散, 不抬升母线)
     cfg.brake.allow_mechanical_brake = false; // 机械制动执行机构未接入前默认关闭
     cfg.brake.allow_coast = true;             // 允许自由滑行 (三相全关 Hi-Z)
+
     cfg.brake.has_brake_resistor = false;     // 是否配置了制动电阻 (能耗制动), true 且有电阻才能用再生制动
     cfg.brake.has_battery_regen_path = false; // 是否有电池回充通路 (能量回收), 无则禁用 regen 以免母线过压
     cfg.brake.control_brake_resistor_chopper = false; // false=电阻支路外部自控或未接入, lib 只消费 budget

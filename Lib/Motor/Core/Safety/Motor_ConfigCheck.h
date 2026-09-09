@@ -36,6 +36,13 @@ public:
     static Fault validateStartupTargetMode(const MotorConfig& cfg,
                                            MotorConfigFaultDetail* detail = nullptr);
 
+    /* validSmoObserverParams -- 校验 SMO 观测器自身参数, 供闭环和 shadow 调试共用 */
+    static bool validSmoObserverParams(const MotorPhysicalParam& physical,
+                                       const MotorObserverParam& observer);
+
+    /* validIFStartupProfile -- 校验 IF 对齐首段和后续拖动段 */
+    static bool validIFStartupProfile(const MotorIFStartupProfile* profile);
+
     /* validateInitConfig -- 总入口: 依次调用 BuildConfig/Base/Feedback/TargetMode 全量校验 */
     static Fault validateInitConfig(const MotorConfig& cfg,
                                     MotorConfigFaultDetail* detail = nullptr);

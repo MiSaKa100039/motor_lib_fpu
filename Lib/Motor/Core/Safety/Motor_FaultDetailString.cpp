@@ -44,6 +44,8 @@ const char* MotorConfigFaultDetailToString(MotorConfigFaultDetail detail)
         /* 0x02xx 基础硬件 */
         case MotorConfigFaultDetail::BUILD_TICK_PROFILING_UNSUPPORTED:
             return "BuildCfg: Cortex-M0 does not support internal tick profiling; use GPIO and oscilloscope";
+        case MotorConfigFaultDetail::BUILD_DEBUG_MODE_CONFLICT:
+            return "BuildCfg: multiple debug bench modes enabled";
         case MotorConfigFaultDetail::HAL_NULL:
             return "HAL 接口指针为空";
         case MotorConfigFaultDetail::POLE_PAIRS_INVALID:
@@ -60,22 +62,16 @@ const char* MotorConfigFaultDetailToString(MotorConfigFaultDetail detail)
             return "相电压采样未编入 BuildCfg";
         case MotorConfigFaultDetail::CURRENT_SENSOR_CONFIG_INVALID:
             return "Current sensor config invalid";
+        case MotorConfigFaultDetail::HAL_PWM_Q15_MISSING:
+            return "fixed-q15 后端缺少 HAL set_duty_q15";
+        case MotorConfigFaultDetail::CONTROL_DIRECTION_INVALID:
+            return "控制方向映射只允许 +1/-1";
         case MotorConfigFaultDetail::PHASE_CURRENT_MASK_INVALID:
             return "相电流有效掩码非法";
         case MotorConfigFaultDetail::PHASE_CURRENT_DUAL_MASK_INVALID:
             return "双电阻模式相电流掩码非法";
         case MotorConfigFaultDetail::PHASE_CURRENT_TRIPLE_MASK_INVALID:
             return "三电阻模式相电流掩码非法";
-        case MotorConfigFaultDetail::PHASE_CURRENT_SINGLE_SHUNT_MASK_INVALID:
-            return "Single-shunt phase current mask invalid";
-        case MotorConfigFaultDetail::SINGLE_SHUNT_HAL_INVALID:
-            return "Single-shunt HAL callbacks invalid";
-        case MotorConfigFaultDetail::SINGLE_SHUNT_WINDOW_INVALID:
-            return "Single-shunt sample window invalid";
-        case MotorConfigFaultDetail::SINGLE_SHUNT_REQUIRES_SHUNT_SENSOR:
-            return "Single-shunt requires shunt-resistor current sensing";
-        case MotorConfigFaultDetail::SINGLE_SHUNT_REQUIRES_SVPWM:
-            return "Single-shunt requires SVPWM modulation";
         case MotorConfigFaultDetail::SENSOR_LPF_INVALID:
             return "LPF 时间常数非有限";
         case MotorConfigFaultDetail::SENSOR_LPF_NEGATIVE:
@@ -151,7 +147,7 @@ const char* MotorConfigFaultDetailToString(MotorConfigFaultDetail detail)
         case MotorConfigFaultDetail::FEEDBACK_SMO_PARAM_INVALID:
             return "SMO 参数非法";
         case MotorConfigFaultDetail::FEEDBACK_IF_PARAM_INVALID:
-            return "IF 启动参数非法 (align_time/drag_current/timeout)";
+            return "IF 启动 profile 布局、阶段参数或重试间隔非法";
         case MotorConfigFaultDetail::FEEDBACK_HFI_UNAVAILABLE:
             return "HFI 观测器未实现";
         case MotorConfigFaultDetail::FEEDBACK_SENSOR_TO_SMO_UNAVAILABLE:
@@ -170,8 +166,6 @@ const char* MotorConfigFaultDetailToString(MotorConfigFaultDetail detail)
             return "顺逆风启动需相电压采样能力";
         case MotorConfigFaultDetail::FEEDBACK_FLYING_START_UNAVAILABLE:
             return "顺逆风启动执行链未实现";
-        case MotorConfigFaultDetail::FEEDBACK_SINGLE_SHUNT_HFI_UNSUPPORTED:
-            return "Single-shunt sampling does not support HFI";
         case MotorConfigFaultDetail::FEEDBACK_FLYING_START_SENSOR_STARTUP_UNSUPPORTED:
             return "有感启动不应开启相电压顺逆风启动";
 

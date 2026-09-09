@@ -21,7 +21,7 @@
 - 查询/调参/校准/调试 API — selectMode/getState/getFault/getMonitorData/setPIDGains/setRunPolicy/startRLIdentification/lockDebug 等 38 个公共 API
 - Phase 2 调用顺序约束 — writeSetpoint 仅写 ctx_ 不切 mode, 上层必须先 selectMode → start → writeSetpoint
 
-### 2. lib 控制环(Lib/Motor/Core/Runtime/Motor_ManagerRuntime.cpp)
+### 2. lib 控制环(Lib/Motor/Core/Runtime/Motor_Runtime.cpp)
 
 - 位置环已接通:
     pos_err = target_pos_rad - angle_mech_sensor
@@ -93,8 +93,8 @@
 | MotorManager::appendSetpointSeg | Motor_ManagerAPI.cpp:163 | return NotSupported | BuildCfg MOTOR_BUILD_ENABLE_SETPOINT_FIFO_PLAYBACK |
 | MotorManager::triggerSegPlayback | Motor_ManagerAPI.cpp:175 | 同上 | 同 |
 | MotorManager::abortSegPlayback | Motor_ManagerAPI.cpp:185 | 同上 | 同 |
-| IMPEDANCE 控制律 | Motor_ManagerRuntime.cpp:163 | iq_ref=0 占位 | BuildCfg MOTOR_BUILD_ENABLE_IMPEDANCE_CONTROL + 真实公式实现 |
-| 力矩前馈速度环叠加 | Motor_ManagerRuntime.cpp (VELOCITY 分支未消费 torque_ff) | 字段已存, 未加进 iq_ref | BuildCfg MOTOR_BUILD_ENABLE_TORQUE_FEEDFORWARD |
+| IMPEDANCE 控制律 | Motor_Runtime.cpp:163 | iq_ref=0 占位 | BuildCfg MOTOR_BUILD_ENABLE_IMPEDANCE_CONTROL + 真实公式实现 |
+| 力矩前馈速度环叠加 | Motor_Runtime.cpp (VELOCITY 分支未消费 torque_ff) | 字段已存, 未加进 iq_ref | BuildCfg MOTOR_BUILD_ENABLE_TORQUE_FEEDFORWARD |
 | controller_.pid_position IMPEDANCE 时复用 | Motor_Control.h:45 注释 | Phase 3 把 Kp=stiffness/torque_constant, Kd=damping/torque_constant | 同 IMPEDANCE |
 | HELD 状态冻结 target_pos_rad | Motor_StreamFSM.cpp:31 注释 | 仅切状态, 不写 ctx_ | BuildCfg MOTOR_BUILD_ENABLE_STREAM_HOLD_WHEN_IDLE |
 | MotorPhysicalParam.load_inertia/torque_constant | Motor_Config.h:42 | 字段已存未消费 | Phase 3 IMPEDANCE 折算 |
@@ -109,7 +109,7 @@
 ### lib 内 TODO HostTest 标签(5 处)
 
 1. Motor_StreamFSM.cpp:17 — ACTIVE→HELD/fault/stop 切换
-2. Motor_ManagerRuntime.cpp:125 — 位置环方向 + vel_ff 叠加方向
+2. Motor_Runtime.cpp:125 — 位置环方向 + vel_ff 叠加方向
 3. Motor_CommandGuard.cpp:145 — POSITION 入口门控(HIGH_RES_ENCODER 通过/HALL 拒)
 4. Motor_ManagerAPI.cpp:57 — writeSetpoint 各 mode 字段落地
 5. Motor_FeatureRegistry.cpp:80 — BuildCfg 关 IMPEDANCE 时 supportsMode 返回值

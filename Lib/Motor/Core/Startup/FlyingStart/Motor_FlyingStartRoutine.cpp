@@ -91,12 +91,13 @@ void MotorFlyingStartRoutine::step(MotorManager& m)
 
         if (tick_counter_ > TIMEOUT_TICKS)
         {
-            // PLL 不收敛超时, 回退到普通 ALIGNMENT 流程
-            // 由 Manager 调用方判断若 FSM 失败则恢复 ALIGNMENT
-            // 这里直接进 DONE 拒绝, Manager 检测 fail-pending 走 stopForFault
+            // PLL 不收敛时从 IF profile 的对齐首段重新开始。
             phase_ = Phase::DONE;
-            // event 不置位
-            m.setRunPhase(RunPhase::ALIGNMENT);
+            m.resetIFStartupProfileState();
+            m.resetIFStartupObserverState();
+            m.if_angle_gen_.reset();
+            m.setRunPhase(RunPhase::FORCE_DRAG);
+            m.ctx_.fsm_timer_ticks = 0U;
             break;
         }
 

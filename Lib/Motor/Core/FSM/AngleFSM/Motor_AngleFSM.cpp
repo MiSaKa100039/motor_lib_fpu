@@ -2,8 +2,8 @@
 
 #include "../../Feature/Motor_FeatureRegistry.h"
 #include "../../Manager/Motor_Manager.h"
-#include "../../../Common/Math/FocMath.h"
-#include "../../../Safety/Basic/Motor_ConfigCheck.h"
+#include "../../../Control/Utils/FocMath.h"
+#include "../../Safety/Motor_ConfigCheck.h"
 
 #include <cmath>
 
@@ -133,29 +133,40 @@ void Motor_AngleFSM::useSensorSource(MotorManager& m)
 void Motor_AngleFSM::useSmoSource(MotorManager& m)
 {
 #if LIB_MOTOR_ENABLE_SMO
+#if LIB_MOTOR_NUMERIC_BACKEND_FIXED_Q15
+    m.smo_.update(m.ctx_.v_alpha, m.ctx_.v_beta,
+                  m.ctx_.i_alpha, m.ctx_.i_beta,
+                  &m.ctx_.smo_estimate);
+    m.ctx_.speed_rpm_observer = m.ctx_.smo_estimate.speed_rpm_q15;
+    m.ctx_.angle_elec_observer =
+        m.correctSmoAngleForControl(m.ctx_.smo_estimate.angle_phase,
+                                    m.ctx_.speed_rpm_observer);
+    m.ctx_.angle_elec = m.ctx_.angle_elec_observer;
+    m.ctx_.speed_rpm = m.ctx_.speed_rpm_observer;
+    m.event_.observer_converged = m.ctx_.smo_estimate.valid ? 1U : 0U;
+    m.event_.speed_valid = m.ctx_.smo_estimate.valid ? 1U : 0U;
+    m.angle_state_ = AngleState::SMO;
+#else
     float angle_rad = m.ctx_.angle_elec_observer;
     float speed_rad_s = 0.0f;
     m.smo_.update(m.ctx_.v_alpha, m.ctx_.v_beta,
                   m.ctx_.i_alpha, m.ctx_.i_beta,
                   m.dt_, &angle_rad, &speed_rad_s);
-    m.ctx_.angle_elec_observer = angle_rad;
     m.ctx_.smo_estimate = m.smo_.estimate();
     m.ctx_.speed_rpm_observer =
         speed_rad_s * 60.0f /
         (TWO_PI * m.config_.physical.pole_pairs);
+    m.ctx_.angle_elec_observer =
+        m.correctSmoAngleForControl(angle_rad, m.ctx_.speed_rpm_observer);
     m.ctx_.angle_elec = m.ctx_.angle_elec_observer;
     m.ctx_.speed_rpm = m.ctx_.speed_rpm_observer;
-m.event_.observer_converged = m.ctx_.smo_estimate.valid ? 1U : 0U;
+    m.event_.observer_converged = m.ctx_.smo_estimate.valid ? 1U : 0U;
     m.event_.speed_valid = m.ctx_.smo_estimate.valid ? 1U : 0U;
     m.angle_state_ = AngleState::SMO;
 
-    /* === [P2] SMO 滑窗 Ke 同步到 ke_v_per_rad_s_identified ===
-     * 加严条件:
-     *   1. SMO valid (已收敛进入稳态源)
-     *   2. valid_ticks >= 2 × convergence_ticks (避免刚收敛 1 tick 抢写)
-     *   3. speed_abs > hfi_to_smo_rpm + hysteresis_rpm (高速稳态才写, 防低速段信号弱误估)
-     * 仅 SMO 应用满足以上条件才持续微更新 identified;
-     * 非 SMO 应用或低速段保留 measured 不变, 工业做法由 VCU 温度补偿。
+    /* === [P2] Ke 同步预留 ===
+     * 当前 SMO 不在估角 tick 内计算 Ke，getEstimatedKe() 保持 0；
+     * 以下条件保留给后续显式 Ke 辨识接入，避免误写 identified。
      */
     if (m.ctx_.smo_estimate.valid &&
         static_cast<uint32_t>(m.ctx_.smo_estimate.valid_ticks) >=
@@ -173,6 +184,7 @@ m.event_.observer_converged = m.ctx_.smo_estimate.valid ? 1U : 0U;
             }
         }
     }
+#endif
 #else
     faultUnavailable(m, AngleState::UNAVAILABLE, Fault::OBSERVER_UNAVAILABLE);
 #endif

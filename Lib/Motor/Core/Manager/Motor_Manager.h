@@ -18,19 +18,20 @@
 #include "../../Public/Motor_Definitions.h"
 #include "../../Public/Motor_Config.h"
 #include "../../Control/Motor_Control.h"
-#include "../../Common/Filter/LowPassFilter.h"
-#include "../../Safety/Basic/Motor_RuntimeMonitor.h"
+#include "../../Control/Utils/LowPassFilter.h"
 #include "../../Observer/Observer_Base.h"
-#if LIB_MOTOR_ENABLE_SMO
+#include "../Safety/Motor_RuntimeMonitor.h"
+#if LIB_MOTOR_ENABLE_SMO_OBSERVER
 #include "../../Observer/Observer_SMO.h"
 #endif
 #if LIB_MOTOR_ENABLE_HFI
 #include "../../Observer/Observer_HFI.h"
 #endif
+#if LIB_MOTOR_ENABLE_SENSOR
 #include "../../Observer/Observer_Sensor.h"
-#include "../Sampling/Motor_SingleShunt.h"
-#include "../Runtime/Motor_FastRuntimeCtx.h"
-#if LIB_MOTOR_ENABLE_IF_STARTUP || LIB_MOTOR_ENABLE_DANGEROUS_TEST_API
+#endif
+#include "../Runtime/Motor_Runtime.h"
+#if LIB_MOTOR_ENABLE_IF_STARTUP || LIB_MOTOR_ENABLE_DEBUG_VF_CONTROL || LIB_MOTOR_ENABLE_DEBUG_IF_ANY
 #include "../../Control/Utils/AngleGenerator.h"
 #endif
 #if LIB_MOTOR_ENABLE_AUTO_IDENTIFY
@@ -74,7 +75,6 @@ class MotorManager
     friend class MotorFlyingStartRoutine;
 #endif
 
-    struct RuntimeCtx;
 #if LIB_MOTOR_ENABLE_SETPOINT_FIFO_PLAYBACK
     enum class SetpointPlaybackState : uint8_t
     {
@@ -121,18 +121,21 @@ public:
 #if LIB_MOTOR_ENABLE_BRAKE_ENERGY_FSM
     void setEnergyBudget(const MotorEnergyBudget& budget);
 #endif
-#if LIB_MOTOR_ENABLE_IF_STARTUP
-    void setDragCurrent(float A);
-#endif
-#if LIB_MOTOR_ENABLE_DANGEROUS_TEST_API
+#if LIB_MOTOR_ENABLE_DEBUG_VF_CONTROL
     void setVFDutyBias(float bias);
+#endif
+#if LIB_MOTOR_ENABLE_DEBUG_PWM_MANUAL
     void setRawPWM(float u, float v, float w);
+#endif
+#if LIB_MOTOR_ENABLE_DEBUG_PROFILE_ANY
     void setDebugRampTime(float seconds);
     void clearDebugStartupProfiles();
-    void setDebugVFStartupProfile(const MotorVFStartupProfile* profile);
-#if LIB_MOTOR_ENABLE_IF_STARTUP
-    void setDebugIFStartupProfile(const MotorIFStartupProfile* profile);
 #endif
+#if LIB_MOTOR_ENABLE_DEBUG_VF_CONTROL
+    bool setDebugVFStartupProfile(const MotorVFStartupProfile* profile);
+#endif
+#if LIB_MOTOR_ENABLE_DEBUG_IF_ANY
+    bool setDebugIFStartupProfile(const MotorIFStartupProfile* profile);
 #endif
 
     /* ======================== 查询接口 ======================== */
@@ -143,6 +146,9 @@ public:
 
     void getMonitorData(MotorMonitorData& data) const;
     void getDebugData(MotorDebugData& data) const;
+    uint8_t getTelemetryFloats(const MotorTelemetryChannel* channels,
+                               uint8_t channel_count,
+                               float* out_values) const;
 
     State        state() const      { return state_; }
     Mode         mode() const       { return mode_; }
@@ -166,13 +172,36 @@ public:
     // 不依赖 wall clock, 与上层 loop 漂移无关
     uint32_t     fsmTimerTicks() const { return ctx_.fsm_timer_ticks; }
     MotorConfigFaultDetail configFaultDetail() const { return config_fault_detail_; }
+    MotorRuntimeFaultDetail runtimeFaultDetail() const { return runtime_fault_detail_; }
     StopMode     stopMode() const   { return stop_mode_; }
     StreamState  streamState() const { return stream_state_; }
     const MotorEvent& event() const { return event_; }
     RunPhase     runPhase() const   { return run_phase_; }
     void         setRunPhase(RunPhase phase) { run_phase_ = phase; }
     const RuntimeCtx& ctx() const   { return ctx_; }
-    const FastRuntimeCtx& fastCtx() const { return fast_ctx_; }
+#if MOTOR_LIB_HOST_TEST
+    RuntimeCtx& ctxMutForTest() { return ctx_; }
+    MotorEvent& eventMutForTest() { return event_; }
+#if LIB_MOTOR_ENABLE_DEBUG_IF_ANY
+    bool stepDebugIFProfileForTest(float& speed_rpm, float& id_ref, float& iq_ref);
+    bool debugIFProfileCompleteForTest() const
+    {
+#if LIB_MOTOR_NUMERIC_BACKEND_FIXED_Q15
+        return ctx_.debug_profile.complete;
+#else
+        return ctx_.debug_profile_complete;
+#endif
+    }
+#endif
+#if LIB_MOTOR_ENABLE_IF_STARTUP
+    bool stepIFStartupProfileForTest(float& speed_rpm, float& id_ref, float& iq_ref);
+    void triggerIFStartupFailureForTest() { handleIFStartupFailure(); }
+    void processPendingStartupRestartForTest() { processPendingStartupRestart(); }
+    bool startupRestartPendingForTest() const { return startup_restart_pending_; }
+    uint8_t startupRestartAttemptsForTest() const { return startup_restart_attempts_; }
+    bool runRequestedForTest() const { return run_requested_; }
+#endif
+#endif
     const MotorRunPolicy& defaultPolicy() const { return config_.default_run_policy; }
 
     /* [P2] 辨识 / 顺逆风启动内部入口 (API 委托) */
@@ -187,22 +216,29 @@ public:
 
     /* ======================== 控制周期入口 ======================== */
     void tick();
+    void serviceSlowMonitor();
 
     /* ======================== 运行辅助 ======================== */
     void runAdcCalibration();
-#if LIB_MOTOR_ENABLE_DANGEROUS_TEST_API
+#if LIB_MOTOR_ENABLE_DEBUG_PWM_MANUAL
     void runPWMManual();
+#endif
+#if LIB_MOTOR_ENABLE_DEBUG_VF_CONTROL
     void runVFControl();
-#if LIB_MOTOR_ENABLE_HFI
+#endif
+#if LIB_MOTOR_ENABLE_DEBUG_HFI_OBSERVER
     void runHFIObserverTest();
+#endif
+#if LIB_MOTOR_ENABLE_DEBUG_HFI_ANY
     void runHFIShadowObserver(bool inject_voltage);
 #endif
-#if LIB_MOTOR_ENABLE_SMO
+#if LIB_MOTOR_ENABLE_SMO_OBSERVER
     void runSMOShadowObserver();
 #endif
-#endif
+#if LIB_MOTOR_ENABLE_AUTO_IDENTIFY || LIB_MOTOR_ENABLE_DEBUG_CURRENT_LOCK
     void runCurrentLock();
-#if LIB_MOTOR_ENABLE_IF_STARTUP
+#endif
+#if LIB_MOTOR_ENABLE_IF_STARTUP || LIB_MOTOR_ENABLE_DEBUG_IF_ANY
     void runIFControl();
 #endif
 
@@ -215,6 +251,8 @@ private:
     RunPhase   run_phase_ = RunPhase::NONE;
     Fault      fault_ = Fault::NONE;
     MotorConfigFaultDetail config_fault_detail_ = MotorConfigFaultDetail::NONE;
+    MotorRuntimeFaultDetail runtime_fault_detail_ = MotorRuntimeFaultDetail::NONE;
+    uint32_t hardware_fault_flags_ = MOTOR_HAL_HW_FAULT_NONE;
     SafetyState safety_state_ = SafetyState::CLEAR;
     CommandState command_state_ = CommandState::IDLE;
     StreamState    stream_state_ = StreamState::NONE;
@@ -247,11 +285,8 @@ private:
 
     float dt_ = 0.0f;
     uint32_t auto_calib_interval_ticks_ = 0;
-#if LIB_MOTOR_ENABLE_IF_STARTUP
-    float drag_current_override_ = 0.0f;
-#endif
 
-mutable MotorConfig config_;   // mutable: SMO 收敛后写 physical.ke_v_per_rad_s_identified 等 identified 字段 (cache)
+mutable MotorConfig config_;   // mutable: 运行期辨识流程可写 physical.*_identified 缓存
     MotorRunPolicy active_policy_;
     MotorRunPolicy pending_policy_;
 #if LIB_MOTOR_ENABLE_BRAKE_ENERGY_FSM
@@ -265,194 +300,7 @@ mutable MotorConfig config_;   // mutable: SMO 收敛后写 physical.ke_v_per_ra
     // 注: 真正 latched event 由 Motor_EnergyFSM 检测时执行
 #endif
 
-    struct RuntimeCtx
-    {
-        /* [A] 预计算换算系数 */
-        float current_scale_Phase_per_count;
-#if MOTOR_BUILD_HAS_BUS_CURRENT
-        float current_scale_Bus_per_count;
-#endif
-        float voltage_scale_V_per_count;
-#if MOTOR_BUILD_HAS_PHASE_VOLTAGE
-        float phase_voltage_scale_V_per_count;
-#endif
-
-        /* [B] ADC 零点偏移 */
-        float calib_accum_ia, calib_accum_ib, calib_accum_ic;
-        float calib_accum_single_shunt_first, calib_accum_single_shunt_second;
-#if MOTOR_BUILD_HAS_BUS_CURRENT
-        float calib_accum_ibus;
-#endif
-        uint16_t calib_counter;
-        float offset_ia, offset_ib, offset_ic;
-        float offset_single_shunt_first, offset_single_shunt_second;
-#if MOTOR_BUILD_HAS_BUS_CURRENT
-        float offset_ibus;
-#endif
-
-#if LIB_MOTOR_ENABLE_DANGEROUS_TEST_API
-        /* [B2] ADC raw samples for bring-up diagnostics only. */
-        uint16_t adc_raw_phase_u;
-        uint16_t adc_raw_phase_v;
-        uint16_t adc_raw_phase_w;
-        uint16_t adc_raw_single_shunt_first;
-        uint16_t adc_raw_single_shunt_second;
-        uint16_t adc_raw_bus_current;
-        uint16_t adc_raw_vbus;
-#if MOTOR_BUILD_HAS_PHASE_VOLTAGE
-        uint16_t adc_raw_phase_voltage_u;
-        uint16_t adc_raw_phase_voltage_v;
-        uint16_t adc_raw_phase_voltage_w;
-#endif
-#if MOTOR_BUILD_NTC_SLOTS > 0
-        uint16_t adc_raw_temp[MOTOR_BUILD_NTC_SLOTS];
-#endif
-#endif
-
-        /* [C] 传感器与观测器反馈 */
-        float i_a, i_b, i_c;
-#if MOTOR_BUILD_HAS_BUS_CURRENT
-        float i_bus;
-#endif
-        float v_bus;
-#if MOTOR_BUILD_HAS_PHASE_VOLTAGE
-        float v_phase_u, v_phase_v, v_phase_w;
-#endif
-#if MOTOR_BUILD_NTC_SLOTS > 0
-        float temperature_c[MOTOR_BUILD_NTC_SLOTS];
-#endif
-        float angle_elec;
-        float angle_elec_command;
-        float angle_elec_observer;
-        float angle_elec_sensor;
-        float angle_mech_sensor;
-        float speed_rpm;
-        float speed_rpm_observer;
-        float speed_rpm_sensor;
-#if LIB_MOTOR_ENABLE_SMO
-        ObserverEstimate smo_estimate;
-#endif
-#if LIB_MOTOR_ENABLE_HFI
-        ObserverEstimate hfi_estimate;
-        HfiInjectionCommand hfi_injection;
-#endif
-        int32_t sensor_raw;
-        bool sensor_ready;
-        SensorHealth sensor_health;
-
-#if MOTOR_BUILD_ENABLE_REDUNDANT_SENSOR
-        float angle_elec_redundant_sensor;
-        float angle_mech_redundant_sensor;
-        int32_t redundant_sensor_raw;
-        bool redundant_sensor_ready;
-        SensorHealth redundant_sensor_health;
-        float rotor_redundancy_error;
-#endif
-
-#if MOTOR_BUILD_ENABLE_OUTPUT_SENSOR
-        float angle_mech_output_sensor;
-        int32_t output_sensor_raw;
-        bool output_sensor_ready;
-        SensorHealth output_sensor_health;
-        float transmission_deflection_rad;
-#endif
-
-        /* [D] FOC 中间量 */
-        float i_alpha_raw, i_beta_raw;
-        float i_alpha, i_beta;
-        MotorSingleShuntSamplePlan single_shunt_sample_plan;
-        MotorCurrentSampleSchedule current_sample_schedule;
-        float i_d, i_q;
-        float v_d, v_q;
-        float v_alpha, v_beta;
-
-        /* [E] 控制目标 */
-        float target_rpm;
-        float target_iq;
-        float target_id;
-        float speed_ref_limited;
-        float speed_pid_iq;
-        float iq_ref_command;
-        float iq_ref_limited;
-        float pending_reverse_rpm = 0.0f;   // 跨零软减速暂存反向目标 (本轮新增, 0=无待执行)
-
-        /* === Phase 2: 位置/前馈通道 ===
-         * target_pos_rad: 位置目标 (rad), 由 writeSetpoint(mode=POSITION_CONTROL, pos_ref=...) 落地
-         * vel_ff_rad_s:   速度前馈 (rad/s), 由 MotionSetpoint.vel_ff 落地
-         * last_setpoint_tick: 距上次 writeSetpoint 的 tick 数, 由 StreamFSM::step 消费判 HELD 超时
-         *
-         * BuildCfg 闸控:
-         *   LIB_MOTOR_ENABLE_POSITION_CONTROL: 适用 target_pos_rad
-         *   LIB_MOTOR_ENABLE_VELOCITY_FEEDFORWARD: 适用 vel_ff_rad_s
-         *   LIB_MOTOR_ENABLE_STREAM_HOLD_WHEN_IDLE: 适用 last_setpoint_tick
-         */
-#if LIB_MOTOR_ENABLE_POSITION_CONTROL
-        float target_pos_rad;
-#endif
-#if LIB_MOTOR_ENABLE_VELOCITY_FEEDFORWARD
-        float vel_ff_rad_s;
-#endif
-#if LIB_MOTOR_ENABLE_STREAM_HOLD_WHEN_IDLE
-        uint32_t last_setpoint_tick;
-#endif
-
-        /* === Phase 3 占位: 力矩前馈通道 === */
-#if LIB_MOTOR_ENABLE_TORQUE_FEEDFORWARD
-        float torque_ff_a;
-#endif
-
-        /* === Phase 3 占位: 阻抗控制 ===
-         * IMPEDANCE 字段在本 Phase 仅写入 ctx_, 控制环不消费;
-         * 切到 IMPEDANCE_CONTROL 的电机启动会被 MotorFeatureRegistry::supportsMode 拒绝
-         * (Phase 2 该函数仍对 IMPEDANCE 返回 false)。Phase 3 接通 runImpedanceControl()。
-         */
-#if LIB_MOTOR_ENABLE_IMPEDANCE_CONTROL
-        float imp_pos_ref_rad;
-        float imp_stiffness_n_m;
-        float imp_damping_n_m_s;
-        float imp_torque_bias_a;
-        float imp_torque_limit_a;
-#endif
-
-        /* [F] 最终输出 */
-        float duty_a, duty_b, duty_c;
-
-        /* [G] 计数器 */
-        uint32_t fsm_timer_ticks;
-        uint16_t slow_loop_counter;
-        uint32_t silent_calib_timer_ticks;
-        bool     silent_calib_active;
-
-        /* 调试专用配置 */
-#if LIB_MOTOR_ENABLE_DANGEROUS_TEST_API
-        float vf_duty_bias;
-        float test_u, test_v, test_w;
-        float debug_ramp_time_s;
-        const MotorVFStartupProfile* debug_vf_profile;
-#if LIB_MOTOR_ENABLE_IF_STARTUP
-        const MotorIFStartupProfile* debug_if_profile;
-#endif
-        uint8_t debug_profile_phase;
-        float debug_profile_phase_time_s;
-        float debug_profile_start_speed_rpm;
-        float debug_profile_start_duty;
-#if LIB_MOTOR_ENABLE_IF_STARTUP
-        float debug_profile_start_id;
-        float debug_profile_start_iq;
-#endif
-        bool debug_profile_phase_started;
-#endif
-#if LIB_MOTOR_ENABLE_IF_STARTUP
-        uint8_t if_profile_phase;
-        float if_profile_phase_time_s;
-        float if_profile_start_speed_rpm;
-        float if_profile_start_id;
-        float if_profile_start_iq;
-        bool if_profile_phase_started;
-#endif
-    } ctx_;
-
-    FastRuntimeCtx fast_ctx_;
+    RuntimeCtx ctx_;
 
     MotorControl controller_;
     MotorRuntimeMonitor runtime_monitor_;
@@ -477,19 +325,34 @@ mutable MotorConfig config_;   // mutable: SMO 收敛后写 physical.ke_v_per_ra
     bool     stall_restart_pending_ = false;
     uint32_t stall_thaw_remaining_ticks_ = 0;  // 堵转释放后渐进解冻剩余 tick 数
 #endif
+#if LIB_MOTOR_ENABLE_IF_STARTUP
+    uint32_t startup_restart_wait_ticks_ = 0U;
+    uint8_t  startup_restart_attempts_ = 0U;
+    bool     startup_restart_pending_ = false;
+#endif
 
     /* ======================== 主控制链 ======================== */
     void updateSensorMeasurements();
+#if LIB_MOTOR_NUMERIC_BACKEND_FIXED_Q15
+    void configureFixedRuntimeScales();
+    void refreshFixedRuntimeOffsetCounts();
+    void configureFixedCurrentPidRuntime(bool reset_integrator);
+    void refreshFixedCurrentPidOutputLimit();
+    RuntimeCurrent clampCurrentTargetQ15(RuntimeCurrent value) const;
+    void setPwmDutyQ15(const FixedNumeric::DutyAbc& duty);
+#endif
+#if LIB_MOTOR_ENABLE_SENSOR
     void updatePositionSensorMeasurement();
+#endif
     void runSafetyCheck();
     void runObserverLoop();
     void runControlLoop();
     void updateCurrentPidVoltageLimit(float omega_elec_rad_s);
 
-    float computeIqReference();
-    void  syncFastRuntimeInputs(float id_ref, float iq_ref);
-    void  syncFastRuntimeTargets();
-    void  publishFastRuntimeOutputs();
+    RuntimeCurrent computeIqReference();
+    void  syncRuntimeInputs(float id_ref, float iq_ref);
+    void  syncRuntimeTargets();
+    void  publishRuntimeOutputs();
     void  applySetpoint(const MotionSetpoint& sp);
     void  resetSetpointPlayback();
     void  serviceSetpointPlayback();
@@ -499,29 +362,48 @@ mutable MotorConfig config_;   // mutable: SMO 收敛后写 physical.ke_v_per_ra
     Result validateRunPolicy(const MotorRunPolicy& policy) const;
     void  updateStallProtection(float speed_error, float iq_ref, float iq_limit);
     void  processPendingStallRestart();
+#if LIB_MOTOR_ENABLE_IF_STARTUP
+    void  clearStartupRestartState();
+    void  resetIFStartupObserverState();
+    void  processPendingStartupRestart();
+    void  handleIFStartupFailure();
+    bool  ifStartupProfileComplete() const;
+#endif
     void  clearControlTargets();
     void  clearDerivedTargets();
     void  clearStallState();
-    void  prepareSingleShuntSampling();
-    void  disableSingleShuntSamplingSchedule();
     void  transitionToStop(StopMode mode, bool clear_user_targets, bool reset_rl_identify = true);
     void  prepareModeTransition(Mode previous_mode, Mode next_mode);
+    void  writePwmOutputs();
+    void  writePwmZeroOutputs();
 
-#if MOTOR_BUILD_NTC_SLOTS > 0
+#if MOTOR_BUILD_NTC_SLOTS > 0 && !LIB_MOTOR_NUMERIC_BACKEND_FIXED_Q15
     float calculateNTC(uint16_t raw_adc, uint8_t ntc_index);
 #endif
     bool  checkConfigValid(const MotorConfig& cfg) const;
     bool  validateControlFeedbackSource();
     void  setFault(Fault fault);
+    void  setFault(Fault fault, MotorRuntimeFaultDetail detail);
     void  stopForFault(Fault fault);
+    void  stopForFault(Fault fault, MotorRuntimeFaultDetail detail);
+    void  pollHardwareFaultLatch();
+    void  clearRuntimeFaultDetail();
+#if LIB_MOTOR_ENABLE_SMO_OBSERVER
+    void  resetSmoAngleDirectionLatch();
+    int8_t updateSmoAngleDirectionLatch(RuntimeSpeed direction_hint);
+    RuntimeAngle correctSmoAngleForControl(RuntimeAngle raw_angle,
+                                           RuntimeSpeed direction_hint);
+#endif
 
     /* ======================== 观测器 / 传感器 ======================== */
-#if LIB_MOTOR_ENABLE_SMO
+#if LIB_MOTOR_ENABLE_SMO_OBSERVER
     SlidingModeObserver smo_;
+    int8_t smo_angle_direction_ = 0;
 #endif
 #if LIB_MOTOR_ENABLE_HFI
     HighFreqInjectionObserver hfi_;
 #endif
+#if LIB_MOTOR_ENABLE_SENSOR
     SensorObserver rotor_sensor_obs_;
 #if MOTOR_BUILD_ENABLE_REDUNDANT_SENSOR
     SensorObserver redundant_sensor_obs_;
@@ -529,22 +411,45 @@ mutable MotorConfig config_;   // mutable: SMO 收敛后写 physical.ke_v_per_ra
 #if MOTOR_BUILD_ENABLE_OUTPUT_SENSOR
     SensorObserver output_sensor_obs_;
 #endif
+#endif
 
     /* ======================== 启动辅助 ======================== */
-#if LIB_MOTOR_ENABLE_IF_STARTUP || LIB_MOTOR_ENABLE_DANGEROUS_TEST_API
+#if LIB_MOTOR_ENABLE_IF_STARTUP || LIB_MOTOR_ENABLE_DEBUG_VF_CONTROL || LIB_MOTOR_ENABLE_DEBUG_IF_ANY
     AngleGenerator if_angle_gen_;
 #endif
 
     /* ======================== 调试辅助 ======================== */
 #if LIB_MOTOR_ENABLE_IF_STARTUP
-    float getEffectiveDragCurrent() const;
     void resetIFStartupProfileState();
+#if LIB_MOTOR_NUMERIC_BACKEND_FIXED_Q15
+    bool prepareIFStartupProfileSnapshot(const MotorIFStartupProfile* profile);
+    void prepareIFStartupRuntimeForStart();
+    bool getIFStartupProfileCommand(RuntimeSpeed& speed_rpm,
+                                    RuntimeCurrent& id_ref,
+                                    RuntimeCurrent& iq_ref);
+#else
     bool getIFStartupProfileCommand(float& speed_rpm, float& id_ref, float& iq_ref);
 #endif
-#if LIB_MOTOR_ENABLE_DANGEROUS_TEST_API
+#endif
+#if LIB_MOTOR_ENABLE_DEBUG_PROFILE_ANY
     void resetDebugProfileState();
+#if LIB_MOTOR_NUMERIC_BACKEND_FIXED_Q15
+    void prepareDebugOpenLoopAngleRampForStart();
+#endif
+#endif
+#if LIB_MOTOR_ENABLE_DEBUG_VF_CONTROL
+#if LIB_MOTOR_NUMERIC_BACKEND_FIXED_Q15
+    bool getDebugVFProfileCommand(RuntimeSpeed& speed_rpm, RuntimeDuty& duty);
+#else
     bool getDebugVFProfileCommand(float& speed_rpm, float& duty);
-#if LIB_MOTOR_ENABLE_IF_STARTUP
+#endif
+#endif
+#if LIB_MOTOR_ENABLE_DEBUG_IF_ANY
+#if LIB_MOTOR_NUMERIC_BACKEND_FIXED_Q15
+    bool getDebugIFProfileCommand(RuntimeSpeed& speed_rpm,
+                                  RuntimeCurrent& id_ref,
+                                  RuntimeCurrent& iq_ref);
+#else
     bool getDebugIFProfileCommand(float& speed_rpm, float& id_ref, float& iq_ref);
 #endif
 #endif

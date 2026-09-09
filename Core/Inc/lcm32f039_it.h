@@ -8,6 +8,7 @@ extern "C" {
 void ADC_Handler(void);
 void TIM1_NON_CC_Handler(void);
 void DMAC_CH0_Handler(void);
+void DMAC_CH1_2_Handler(void);
 void SysTick_Handler(void);
 
 #ifdef __cplusplus

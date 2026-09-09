@@ -85,25 +85,25 @@ bool MotorFeatureRegistry::supportsMode(Mode mode)
 #endif
 
         case Mode::DEBUG_PWM_MANUAL:
+            return LIB_MOTOR_ENABLE_DEBUG_PWM_MANUAL != 0;
+
         case Mode::DEBUG_CURRENT_LOCK:
+            return LIB_MOTOR_ENABLE_DEBUG_CURRENT_LOCK != 0;
+
         case Mode::DEBUG_VF_DRAG:
-            return supportsDangerousTestApi();
+            return LIB_MOTOR_ENABLE_DEBUG_VF_CONTROL != 0;
 
         case Mode::DEBUG_HFI_OBSERVER:
-            return supportsDangerousTestApi() && (LIB_MOTOR_ENABLE_HFI != 0);
+            return LIB_MOTOR_ENABLE_DEBUG_HFI_OBSERVER != 0;
 
         case Mode::DEBUG_IF_DRAG:
-            return supportsDangerousTestApi() && (LIB_MOTOR_ENABLE_IF_STARTUP != 0);
+            return LIB_MOTOR_ENABLE_DEBUG_IF_CONTROL != 0;
 
         case Mode::DEBUG_IF_SMO_OBSERVER:
-            return supportsDangerousTestApi() &&
-                   (LIB_MOTOR_ENABLE_IF_STARTUP != 0) &&
-                   (LIB_MOTOR_ENABLE_SMO != 0);
+            return LIB_MOTOR_ENABLE_DEBUG_IF_SMO_OBSERVER != 0;
 
         case Mode::DEBUG_IF_HFI_OBSERVER:
-            return supportsDangerousTestApi() &&
-                   (LIB_MOTOR_ENABLE_IF_STARTUP != 0) &&
-                   (LIB_MOTOR_ENABLE_HFI != 0);
+            return LIB_MOTOR_ENABLE_DEBUG_IF_HFI_OBSERVER != 0;
 
         default:
             return false;
@@ -117,7 +117,7 @@ bool MotorFeatureRegistry::supportsStallProtection()
 
 bool MotorFeatureRegistry::supportsDangerousTestApi()
 {
-    return LIB_MOTOR_ENABLE_DANGEROUS_TEST_API != 0;
+    return LIB_MOTOR_ENABLE_DEBUG_ANY != 0;
 }
 
 bool MotorFeatureRegistry::supportsBrakeEnergyFsm()

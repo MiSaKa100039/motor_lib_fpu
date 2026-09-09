@@ -10,77 +10,14 @@
 #pragma once
 
 #include "../Public/Motor_Config.h"
-#include "../Common/Filter/PidController.h"
+#include "Utils/MotorPIAutoTune.h"
+#include "Utils/PidController.h"
 #if LIB_MOTOR_NUMERIC_BACKEND_FIXED_Q15
 #include "../Core/Numeric/Motor_FixedNumeric.h"
 #endif
 
 namespace Lib_Motor
 {
-
-/*
- * MotorPIAutoTune — 电流/速度环 PI 增益自动推导
- *
- * 电流环 (本轮接入):
- *   电流环对象方程: L·dI/dt + R·I = V
- *   设期望闭环带宽 f_bw (Hz), 使用保守一阶带宽整定:
- *     ωc = 2πf_bw (rad/s)
- *     kp = L*ωc                 [单位 V/A]
- *     ki = R*ωc                 [单位 V/(A·s)] (与积分项 integral += ki*error*dt 一致)
- *
- * 速度环 (本轮仅声明, P5 落地):
- *   推导需要机械侧 J/torque_constant; 未实现 → ConfigCheck 拒绝 (auto_derive_speed_pid=true)。
- */
-class MotorPIAutoTune
-{
-public:
-    /* 电流环增益推导 (本轮完整实现) */
-    static void deriveCurrentLoopGains(
-        float bandwidth_hz, float zeta,
-        float rs, float ls,
-        float& out_kp, float& out_ki)
-    {
-        const float omega_c = 2.0f * 3.14159265f * bandwidth_hz;
-        if (bandwidth_hz <= 0.0f || zeta <= 0.0f || rs <= 0.0f || ls <= 0.0f)
-        {
-            out_kp = 0.0f;
-            out_ki = 0.0f;
-            return;
-        }
-        out_kp = omega_c * ls;                    // [V/A]
-        out_ki = omega_c * rs;                    // [V/(A·s)] 直接积分关系
-    }
-
-    /* 速度环增益推导 (本轮仅占位, P5 在 cfg 物理惯量数据完备后落地)
-     * 需要 cfg.physical.load_inertia_kg_m2 > 0 与 torque_constant > 0 才有意义;
-     * 当前 ConfigCheck 已拒绝 auto_derive_speed_pid=true, 走到此项应返错误。
-     */
-    static void deriveSpeedLoopGains(
-        float bandwidth_hz, float zeta,
-        float torque_constant_n_m_per_a,
-        float inertia_kg_m2,
-        float& out_kp, float& out_ki)
-    {
-        (void)bandwidth_hz; (void)zeta;
-        (void)torque_constant_n_m_per_a; (void)inertia_kg_m2;
-        out_kp = 0.0f; out_ki = 0.0f;
-    }
-
-    /* [P4] 位置环增益推导占位 (P5 落地)
-     * 需要 cfg.physical.load_inertia > 0 与 torque_constant > 0;
-     * 当前 ConfigCheck 已拒绝 auto_derive_position_pid=true。
-     */
-    static void derivePositionLoopGains(
-        float bandwidth_hz, float zeta,
-        float torque_constant_n_m_per_a,
-        float inertia_kg_m2,
-        float& out_kp, float& out_ki)
-    {
-        (void)bandwidth_hz; (void)zeta;
-        (void)torque_constant_n_m_per_a; (void)inertia_kg_m2;
-        out_kp = 0.0f; out_ki = 0.0f;
-    }
-};
 
 class MotorControl
 {
@@ -147,11 +84,6 @@ public:
         pid_q.reset();
         pid_speed.reset();
         pid_position.reset();
-#if LIB_MOTOR_NUMERIC_BACKEND_FIXED_Q15
-        fixed_pid_d_.reset();
-        fixed_pid_q_.reset();
-        fixed_pid_speed_.reset();
-#endif
     }
 
     /* [P2] RL 辨识完成后回调: 若 auto_derive_current_pid=true,
@@ -194,53 +126,111 @@ public:
         }
     }
 
-#if LIB_MOTOR_NUMERIC_BACKEND_FIXED_Q15
-    void syncFixedCurrentPid(const MotorConfig& cfg, float dt, float vbus)
+    void setCurrentOutputLimit(float limit)
     {
-        const float current_base = currentBase(cfg);
-        const float voltage_base = (vbus > 0.1f) ? vbus : 0.1f;
-        fixed_pid_d_.configure(pid_d.kp(), pid_d.ki(), current_base, voltage_base,
-                               dt, pid_d.outputLimit(), false);
-        fixed_pid_q_.configure(pid_q.kp(), pid_q.ki(), current_base, voltage_base,
-                               dt, pid_q.outputLimit(), false);
+        pid_d.setOutputLimit(limit);
+        pid_q.setOutputLimit(limit);
+    }
+
+    bool setCurrentPidParam(PidGroup group, const PIDParam& param)
+    {
+        switch (group)
+        {
+            case PidGroup::CurrentD:
+                pid_d.init(param);
+                return true;
+            case PidGroup::CurrentQ:
+                pid_q.init(param);
+                return true;
+            default:
+                return false;
+        }
+    }
+
+    void resetSpeedPid()
+    {
+        pid_speed.reset();
+    }
+
+    void resetCurrentPid()
+    {
+        pid_d.reset();
+        pid_q.reset();
+    }
+
+    void decaySpeedIntegral(float factor)
+    {
+        pid_speed.decayIntegral(factor);
+    }
+
+#if LIB_MOTOR_NUMERIC_BACKEND_FIXED_Q15
+    void configureFixedCurrentPid(float current_base,
+                                  float voltage_base,
+                                  float dt,
+                                  bool reset_integrator)
+    {
+        pid_d.configureFixedGains(current_base, voltage_base, dt, reset_integrator);
+        pid_q.configureFixedGains(current_base, voltage_base, dt, reset_integrator);
+    }
+
+    void setFixedCurrentOutputLimitQ15(FixedNumeric::q15_t limit)
+    {
+        pid_d.setOutputLimitQ15(limit);
+        pid_q.setOutputLimitQ15(limit);
     }
 
     void syncFixedSpeedPid(const MotorConfig& cfg, float dt, float output_limit_a)
     {
-        fixed_pid_speed_.configure(pid_speed.kp(), pid_speed.ki(), speedBase(cfg),
-                                   currentBase(cfg), dt, output_limit_a, false);
+        pid_speed.configureFixed(speedBase(cfg), currentBase(cfg), dt, output_limit_a, false);
     }
 
     FixedNumeric::q15_t updateFixedCurrentD(FixedNumeric::q15_t error)
     {
-        return fixed_pid_d_.update(error);
+        return pid_d.update(error);
     }
 
     FixedNumeric::q15_t updateFixedCurrentQ(FixedNumeric::q15_t error)
     {
-        return fixed_pid_q_.update(error);
+        return pid_q.update(error);
     }
 
     float updateFixedSpeed(const MotorConfig& cfg, float speed_error_rpm, bool hold_integral)
     {
         const FixedNumeric::q15_t error =
             FixedNumeric::fromPhysical(speed_error_rpm, speedBase(cfg));
-        const FixedNumeric::q15_t output = fixed_pid_speed_.update(error, hold_integral);
+        const FixedNumeric::q15_t output = pid_speed.update(error, hold_integral);
         return FixedNumeric::toPhysical(output, currentBase(cfg));
     }
 
-    void decayFixedSpeedIntegral(float factor)
+#if LIB_MOTOR_ENABLE_POSITION_CONTROL
+    void syncFixedPositionPid(const MotorConfig& cfg, float dt, float output_limit_rpm)
     {
-        fixed_pid_speed_.decayIntegral(factor);
+        constexpr float kPositionBaseRad = 6.28318530718f;
+        pid_position.configureFixed(
+            kPositionBaseRad, speedBase(cfg), dt, output_limit_rpm, false);
     }
+
+    float updateFixedPosition(const MotorConfig& cfg, float position_error_rad)
+    {
+        constexpr float kPositionBaseRad = 6.28318530718f;
+        const FixedNumeric::q15_t error =
+            FixedNumeric::fromPhysical(position_error_rad, kPositionBaseRad);
+        const FixedNumeric::q15_t output = pid_position.update(error);
+        return FixedNumeric::toPhysical(output, speedBase(cfg));
+    }
+#endif
 
     static float currentBase(const MotorConfig& cfg)
     {
-        if (cfg.physical.rated_current > 0.0f)
+        if (cfg.motion.max_iq_ref_a > 0.0f)
         {
-            return cfg.physical.rated_current;
+            return cfg.motion.max_iq_ref_a;
         }
-        return (cfg.limit.max_current_a > 0.0f) ? cfg.limit.max_current_a : 1.0f;
+        if (cfg.limit.max_phase_current_a > 0.0f)
+        {
+            return cfg.limit.max_phase_current_a;
+        }
+        return (cfg.physical.rated_current > 0.0f) ? cfg.physical.rated_current : 1.0f;
     }
 
     static float speedBase(const MotorConfig& cfg)
@@ -258,12 +248,6 @@ public:
      * stiffness/torque_constant 与 damping/torque_constant。届时把
      * pid_position.init 换成"按 MotorImpedanceParam 折算 PID gain"的入口。
      */
-#if LIB_MOTOR_NUMERIC_BACKEND_FIXED_Q15
-private:
-    FixedNumeric::FixedPiController fixed_pid_d_;
-    FixedNumeric::FixedPiController fixed_pid_q_;
-    FixedNumeric::FixedPiController fixed_pid_speed_;
-#endif
 };
 
 } // namespace Lib_Motor

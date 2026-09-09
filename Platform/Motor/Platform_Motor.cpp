@@ -1,7 +1,6 @@
 #include "Platform_Motor.h"
 #include "BSP_Motor.h"
 #include "Platform_MotorFeatures.h"
-#include "User_MotorTestConfig.h"
 
 #include "MotorCfg/Platform_MotorConfig1_Basic.h"
 #include "MotorCfg/Platform_MotorConfig2_FeedbackStartup.h"
@@ -23,22 +22,20 @@ bool g_platform_motor_hardware_started = false;
 
 Lib_Motor::Mode Platform_UserMotorTestStartupMode()
 {
-#if defined(USER_MOTOR_TEST_PWM_MANUAL)
+#if LIB_MOTOR_ENABLE_DEBUG_PWM_MANUAL
     return Lib_Motor::Mode::DEBUG_PWM_MANUAL;
-#elif defined(USER_MOTOR_TEST_CURRENT_LOCK)
+#elif LIB_MOTOR_ENABLE_DEBUG_CURRENT_LOCK
     return Lib_Motor::Mode::DEBUG_CURRENT_LOCK;
-#elif defined(USER_MOTOR_TEST_VF_CONTROL)
+#elif LIB_MOTOR_ENABLE_DEBUG_VF_CONTROL
     return Lib_Motor::Mode::DEBUG_VF_DRAG;
-#elif defined(USER_MOTOR_TEST_IF_CONTROL)
+#elif LIB_MOTOR_ENABLE_DEBUG_IF_CONTROL
     return Lib_Motor::Mode::DEBUG_IF_DRAG;
-#elif defined(USER_MOTOR_TEST_IF_SMO_OBSERVER)
+#elif LIB_MOTOR_ENABLE_DEBUG_IF_SMO_OBSERVER
     return Lib_Motor::Mode::DEBUG_IF_SMO_OBSERVER;
-#elif defined(USER_MOTOR_TEST_IF_HFI_OBSERVER)
+#elif LIB_MOTOR_ENABLE_DEBUG_IF_HFI_OBSERVER
     return Lib_Motor::Mode::DEBUG_IF_HFI_OBSERVER;
-#elif defined(USER_MOTOR_TEST_HFI_OBSERVER)
+#elif LIB_MOTOR_ENABLE_DEBUG_HFI_OBSERVER
     return Lib_Motor::Mode::DEBUG_HFI_OBSERVER;
-#elif defined(USER_MOTOR_TEST_RL_IDENTIFY)
-    return Lib_Motor::Mode::CALIB_RL_IDENTIFY;
 #else
     return Lib_Motor::Mode::NONE;
 #endif
@@ -89,12 +86,34 @@ Lib_Motor::Result Platform_Motor_Init(void)
 
     const Lib_Motor::Result init_result = Global_Motor_0.init(cfg);
     /*
-     * init() 返回错误时 Manager 也会进入 ERROR 诊断态。只要 Manager 已存在，
-     * 就启动 TIM/ADC，让 ISR tick 持续刷新 state_/fault_/config_fault_detail_。
+     * 普通固件只在配置校验成功后启动 TIM/ADC。
+     * 配置错误已由 Manager 锁存到 ERROR，继续跑采样链会用未校准 offset
+     * 叠加软件过流等二次故障，反而掩盖第一现场。
      */
+#if LIB_MOTOR_ENABLE_ISR_LOAD_DIAGNOSTIC
     if (Global_Motor_0.getState() != Lib_Motor::State::UNINITIALIZED)
+#else
+    if (init_result == Lib_Motor::Result::Ok)
+#endif
     {
         Platform_StartMotorHardwareOnce();
     }
     return init_result;
+}
+
+Lib_Motor::Result Platform_Motor_ResetRuntimeAndSampling(void)
+{
+    if (!BSP_Motor_ResyncSamplingPath())
+    {
+        g_platform_motor_hardware_started = false;
+        return Lib_Motor::Result::Error;
+    }
+
+    g_platform_motor_hardware_started = true;
+    return Global_Motor_0.reset();
+}
+
+const Lib_Motor::MotorIFStartupProfile& Platform_Motor_GetIFStartupProfile(void)
+{
+    return Platform_MotorConfig::Platform_NormalIFStartupProfile;
 }

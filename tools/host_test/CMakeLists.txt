@@ -6,11 +6,14 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+if(MSVC)
+    add_compile_options(/utf-8)
+endif()
+
 add_executable(motor_host_test
     test_main.cpp
     ../../Lib/Motor/Core/API/Motor_API.cpp
     ../../Lib/Motor/Core/Debug/Motor_ManagerDebug.cpp
-    ../../Lib/Motor/Core/Debug/Motor_OzoneTuning.cpp
     ../../Lib/Motor/Core/Feature/Motor_FeatureRegistry.cpp
     ../../Lib/Motor/Core/FSM/Motor_FSM.cpp
     ../../Lib/Motor/Core/FSM/AngleFSM/Motor_AngleFSM.cpp
@@ -28,7 +31,7 @@ add_executable(motor_host_test
     ../../Lib/Motor/Core/Monitor/Motor_ManagerMonitor.cpp
     ../../Lib/Motor/Core/Numeric/Motor_FixedNumeric.cpp
     ../../Lib/Motor/Core/RunPlan/Motor_RunPlan.cpp
-    ../../Lib/Motor/Core/Runtime/Motor_ManagerRuntime.cpp
+    ../../Lib/Motor/Core/Runtime/Motor_Runtime.cpp
     ../../Lib/Motor/Core/Safety/Motor_CommandGuard.cpp
     ../../Lib/Motor/Core/Safety/Motor_ConfigCheck.cpp
     ../../Lib/Motor/Core/Safety/Motor_FaultDetailString.cpp
@@ -36,20 +39,93 @@ add_executable(motor_host_test
     ../../Lib/Motor/Core/Safety/Motor_RuntimeMonitor.cpp
     ../../Lib/Motor/Core/Safety/Motor_SignalHealth.cpp
     ../../Lib/Motor/Core/Sampling/Motor_ManagerSampling.cpp
-    ../../Lib/Motor/Core/Sampling/Motor_SingleShunt.cpp
     ../../Lib/Motor/Core/Startup/Motor_ManagerStartup.cpp
     ../../Lib/Motor/Core/Startup/FlyingStart/Motor_FlyingStartRoutine.cpp
 )
 
 target_compile_definitions(motor_host_test PRIVATE
+    LIB_MOTOR_NUMERIC_BACKEND_FIXED_Q15=0
+    LIB_MOTOR_NUMERIC_BACKEND_FLOAT32=1
     MOTOR_LIB_HOST_TEST=1
-    MOTOR_BUILD_CURRENT_SENSE_MODE=1
+    MOTOR_BUILD_CURRENT_SENSE_MODE=2
+    MOTOR_BUILD_HAS_BUS_CURRENT=1
+    MOTOR_BUILD_NTC_SLOTS=1
     MOTOR_BUILD_ENABLE_SENSOR
     MOTOR_BUILD_ENABLE_SMO
     MOTOR_BUILD_ENABLE_HFI
     MOTOR_BUILD_ENABLE_DANGEROUS_TEST_API
     MOTOR_BUILD_ENABLE_VELOCITY_CONTROL
 )
+
+# 原有测试使用浮点物理量；定点回归单独编译，避免启用尚未移植的 HFI/有感组合。
+get_target_property(motor_test_sources motor_host_test SOURCES)
+list(REMOVE_ITEM motor_test_sources test_main.cpp)
+add_executable(motor_q15_test ${motor_test_sources}
+    test_entry.cpp test_smo_q15.cpp test_stop.cpp test_if_startup.cpp)
+target_compile_definitions(motor_q15_test PRIVATE
+    MOTOR_LIB_HOST_TEST=1
+    LIB_MOTOR_NUMERIC_BACKEND_FIXED_Q15=1
+    LIB_MOTOR_NUMERIC_BACKEND_FLOAT32=0)
+
+target_sources(motor_host_test PRIVATE test_stop.cpp test_if_startup.cpp)
+
+foreach(if_backend IN ITEMS float q15)
+    add_executable(motor_if_startup_${if_backend}_test
+        ${motor_test_sources}
+        test_entry.cpp
+        test_if_startup.cpp)
+    target_compile_definitions(motor_if_startup_${if_backend}_test PRIVATE
+        MOTOR_LIB_HOST_TEST=1
+        MOTOR_BUILD_CURRENT_SENSE_MODE=2
+        MOTOR_BUILD_HAS_BUS_CURRENT=1
+        MOTOR_BUILD_NTC_SLOTS=1
+        LIB_MOTOR_ENABLE_IF_STARTUP=1
+        LIB_MOTOR_ENABLE_SMO=1
+        LIB_MOTOR_ENABLE_DEBUG_IF_CONTROL=0
+        LIB_MOTOR_ENABLE_DEBUG_IF_SMO_OBSERVER=0
+        LIB_MOTOR_ENABLE_DEBUG_IF_HFI_OBSERVER=0
+        LIB_MOTOR_ENABLE_SENSOR=0
+        LIB_MOTOR_ENABLE_HFI=0
+        LIB_MOTOR_ENABLE_STALL_PROTECTION=0)
+endforeach()
+
+target_compile_definitions(motor_if_startup_float_test PRIVATE
+    LIB_MOTOR_NUMERIC_BACKEND_FIXED_Q15=0
+    LIB_MOTOR_NUMERIC_BACKEND_FLOAT32=1)
+target_compile_definitions(motor_if_startup_q15_test PRIVATE
+    LIB_MOTOR_NUMERIC_BACKEND_FIXED_Q15=1
+    LIB_MOTOR_NUMERIC_BACKEND_FLOAT32=0)
+
+add_executable(motor_if_debug_float_test
+    ${motor_test_sources}
+    test_entry.cpp
+    test_if_startup.cpp)
+target_compile_definitions(motor_if_debug_float_test PRIVATE
+    MOTOR_LIB_HOST_TEST=1
+    MOTOR_BUILD_CURRENT_SENSE_MODE=2
+    MOTOR_BUILD_HAS_BUS_CURRENT=1
+    MOTOR_BUILD_NTC_SLOTS=1
+    LIB_MOTOR_NUMERIC_BACKEND_FIXED_Q15=0
+    LIB_MOTOR_NUMERIC_BACKEND_FLOAT32=1
+    LIB_MOTOR_ENABLE_IF_STARTUP=0
+    LIB_MOTOR_ENABLE_SMO=0
+    LIB_MOTOR_ENABLE_DEBUG_IF_SMO_OBSERVER=1
+    LIB_MOTOR_ENABLE_SENSOR=0
+    LIB_MOTOR_ENABLE_HFI=0
+    LIB_MOTOR_ENABLE_STALL_PROTECTION=0)
+
+add_executable(motor_pwm_output_test test_pwm_outputs.cpp test_entry.cpp)
+target_include_directories(motor_pwm_output_test PRIVATE
+    ${CMAKE_CURRENT_LIST_DIR}/mocks
+    ${CMAKE_CURRENT_LIST_DIR}/../../Core/Inc)
+
+enable_testing()
+add_test(NAME motor_float COMMAND motor_host_test)
+add_test(NAME motor_q15 COMMAND motor_q15_test)
+add_test(NAME motor_if_startup_float COMMAND motor_if_startup_float_test)
+add_test(NAME motor_if_startup_q15 COMMAND motor_if_startup_q15_test)
+add_test(NAME motor_if_debug_float COMMAND motor_if_debug_float_test)
+add_test(NAME motor_pwm_outputs COMMAND motor_pwm_output_test)
 
 target_include_directories(motor_host_test PRIVATE
     ${CMAKE_CURRENT_LIST_DIR}
@@ -72,3 +148,9 @@ target_include_directories(motor_host_test PRIVATE
     ${CMAKE_CURRENT_LIST_DIR}/../../Platform/Motor/MotorCfg
     ${CMAKE_CURRENT_LIST_DIR}/../../Platform/Motor/TestCfg
 )
+
+get_target_property(motor_test_includes motor_host_test INCLUDE_DIRECTORIES)
+target_include_directories(motor_q15_test PRIVATE ${motor_test_includes})
+target_include_directories(motor_if_startup_float_test PRIVATE ${motor_test_includes})
+target_include_directories(motor_if_startup_q15_test PRIVATE ${motor_test_includes})
+target_include_directories(motor_if_debug_float_test PRIVATE ${motor_test_includes})

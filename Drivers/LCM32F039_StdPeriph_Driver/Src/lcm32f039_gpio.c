@@ -85,20 +85,20 @@ void GPIO_DeInit(GPIO_TypeDef *GPIOx) //@zhang end
   }
 }
 /*--------------------------------------------------------------------------------------------
-reset引脚PF2作为普通GPIO使用
+reset????PF2??????GPIO???
 --------------------------------------------------------------------------------------------*/
 void GPIO_ResetPinConfig(uint32_t NewState)
 {
   if (NewState != DISABLE)
   {
     chipctrl_access();
-    CHIPCTRL->BDCR_b.RST_CFG = 0; // PF2作为通用GPIO /PF2 acts as a universal GPIO
+    CHIPCTRL->BDCR_b.RST_CFG = 0; // PF2??????GPIO /PF2 acts as a universal GPIO
     __dekey();
   }
   else
   {
     chipctrl_access();
-    CHIPCTRL->BDCR_b.RST_CFG = 1; // PF2作为复位引脚 /PF2 serves as the reset pin
+    CHIPCTRL->BDCR_b.RST_CFG = 1; // PF2?????λ???? /PF2 serves as the reset pin
     __dekey();
   }
 }
@@ -119,16 +119,16 @@ void GPIO_Init(GPIO_TypeDef *GPIOx, GPIO_InitTypeDef *GPIO_InitStruct)
   /* Check the parameters */
   assert_param(IS_GPIO_ALL_PERIPH(GPIOx));
   assert_param(IS_GPIO_PIN(GPIO_InitStruct->GPIO_Pin));
-  assert_param(IS_GPIO_MODE(GPIO_InitStruct->GPIO_Mode)); // 数值完全对应 /The values correspond exactly
+  assert_param(IS_GPIO_MODE(GPIO_InitStruct->GPIO_Mode)); // ????????? /The values correspond exactly
   assert_param(IS_GPIO_PUPD(GPIO_InitStruct->GPIO_PuPd));
   assert_param(IS_GPIO_OTYPE(GPIO_InitStruct->GPIO_OType));
   if (GPIO_InitStruct->GPIO_Mode == GPIO_Mode_OUT)
   {
-    GPIO_InitStruct->GPIO_PuPd = GPIO_PuPd_NOPULL; // 输出模式无上下拉 /Output mode No pull-down
+    GPIO_InitStruct->GPIO_PuPd = GPIO_PuPd_NOPULL; // ????????????? /Output mode No pull-down
   }
   /*-------------------------- Configure the port pins -----------------------*/
-  pinpos = GPIO_InitStruct->GPIO_Pin; // 取出有多少位要配置 /Fetch how many bits to configure
-  for (pos = 0; pos < 16; pos++)      // 模式配置 /mode configuration
+  pinpos = GPIO_InitStruct->GPIO_Pin; // ????ж???λ????? /Fetch how many bits to configure
+  for (pos = 0; pos < 16; pos++)      // ?????? /mode configuration
   {
     if ((pinpos >> pos) & 0x01)
     {
@@ -138,7 +138,7 @@ void GPIO_Init(GPIO_TypeDef *GPIOx, GPIO_InitTypeDef *GPIO_InitStruct)
       GPIOx->MODER = tmpreg;
     }
   }
-  for (pos = 0; pos < 16; pos++) // 翻转斜率 /Flip the slope
+  for (pos = 0; pos < 16; pos++) // ???б?? /Flip the slope
   {
     if ((pinpos >> pos) & 0x01)
     {
@@ -153,7 +153,7 @@ void GPIO_Init(GPIO_TypeDef *GPIOx, GPIO_InitTypeDef *GPIO_InitStruct)
       }
     }
   }
-  for (pos = 0; pos < 16; pos++) // 电阻上拉下拉 /Resistance pulls up and down
+  for (pos = 0; pos < 16; pos++) // ???????????? /Resistance pulls up and down
   {
     if ((pinpos >> pos) & 0x01)
     {
@@ -172,7 +172,7 @@ void GPIO_Init(GPIO_TypeDef *GPIOx, GPIO_InitTypeDef *GPIO_InitStruct)
         GPIOx->PU_BSRR = 1 << pos;
         GPIOx->PD_BSRR = 1 << pos;
       }
-      else // 如果没有选定确认的 PULL 则给默认为 NOPULL /If no confirmed PULL is selected, the default value is NOPULL
+      else // ????????????? PULL ??????? NOPULL /If no confirmed PULL is selected, the default value is NOPULL
       {
         GPIOx->PU_BSRR = 1 << (pos + 16);
         GPIOx->PD_BSRR = 1 << (pos + 16);
@@ -181,7 +181,7 @@ void GPIO_Init(GPIO_TypeDef *GPIOx, GPIO_InitTypeDef *GPIO_InitStruct)
   }
   // if((GPIOx->MODER==GPIO_Mode_OUT)||(GPIOx->MODER==GPIO_Mode_IN))
 
-  for (pos = 0; pos < 16; pos++) // 输出类型 /The output type
+  for (pos = 0; pos < 16; pos++) // ??????? /The output type
   {
     if ((pinpos >> pos) & 0x01)
     {
@@ -219,7 +219,7 @@ void GPIO_StructInit(GPIO_InitTypeDef *GPIO_InitStruct)
   GPIO_InitStruct->GPIO_PuPd = GPIO_PuPd_NOPULL;
 }
 
-/**   已经修@zhang
+/**   ?????@zhang
  * @brief  Locks GPIO Pins configuration registers.
  * @note   Each lock bit freezes a specific configuration register (control and alternate function
  *			registers)
@@ -252,7 +252,7 @@ void GPIO_PinLockConfig(GPIO_TypeDef *GPIOx, uint16_t GPIO_Pin)
   if (!((GPIOx->LCKR >> 16) & 0x01))
   {
     while (1)
-      ; // 如果锁定失败将停在这里 /It will stop here if the lock fails
+      ; // ?????????????????? /It will stop here if the lock fails
   };
 }
 
@@ -272,7 +272,7 @@ void GPIO_PinLockConfig(GPIO_TypeDef *GPIOx, uint16_t GPIO_Pin)
   * @{
   */
 
-/**   已修改@zhang
+/**   ?????@zhang
  * @brief  Reads the specified input port pin.
  * @param  GPIOx: where x can be (A, B, F) to select the GPIO peripheral.
  * @param  GPIO_Pin: specifies the port bit to read.
@@ -298,7 +298,7 @@ uint8_t GPIO_ReadInputDataBit(GPIO_TypeDef *GPIOx, uint16_t GPIO_Pin)
   return bitstatus;
 }
 
-/**    已修改@zhaeng0102
+/**    ?????@zhaeng0102
  * @brief  Reads the specified input port pin.
  * @param  GPIOx: where x can be (A, B, F) to select the GPIO peripheral.
  * @retval The input port pin value.
@@ -311,7 +311,7 @@ uint16_t GPIO_ReadInputData(GPIO_TypeDef *GPIOx)
   return ((uint16_t)GPIOx->IDR);
 }
 
-/**   已修改@zhaeng0102
+/**   ?????@zhaeng0102
  * @brief  Reads the specified output data port bit.
  * @param  GPIOx: where x can be (A, B,  F) to select the GPIO peripheral.
  * @param  GPIO_Pin: Specifies the port bit to read.
@@ -337,7 +337,7 @@ uint8_t GPIO_ReadOutputDataBit(GPIO_TypeDef *GPIOx, uint16_t GPIO_Pin)
   return bitstatus;
 }
 
-/**   已修改@zhang
+/**   ?????@zhang
  * @brief  Reads the specified GPIO output data port.
  * @param  GPIOx: where x can be (A, B,  F) to select the GPIO peripheral.
  * @retval GPIO output data port value.
@@ -350,7 +350,7 @@ uint16_t GPIO_ReadOutputData(GPIO_TypeDef *GPIOx)
   return ((uint16_t)GPIOx->ODR);
 }
 
-/**     已修改@zhang
+/**     ?????@zhang
  * @brief  Sets the selected data port bits.
  * @param  GPIOx: where x can be (A, B, F) to select the GPIO peripheral.
  * @param  GPIO_Pin: specifies the port bits to be written.
@@ -366,7 +366,7 @@ void GPIO_SetBits(GPIO_TypeDef *GPIOx, uint16_t GPIO_Pin)
   GPIOx->BSRR = GPIO_Pin;
 }
 
-/**  已修改@zhang
+/**  ?????@zhang
  * @brief  Clears the selected data port bits.
  * @param  GPIOx: where x can be (A, B, F) to select the GPIO peripheral.
  * @param  GPIO_Pin: specifies the port bits to be written.
@@ -382,7 +382,7 @@ void GPIO_ResetBits(GPIO_TypeDef *GPIOx, uint16_t GPIO_Pin)
   GPIOx->BSRR = GPIO_Pin << 16;
 }
 
-/**          已修改@zhang
+/**          ?????@zhang
  * @brief  Sets or clears the selected data port bit.
  * @param  GPIOx: where x can be (A, B, C, D or F) to select the GPIO peripheral.
  * @param  GPIO_Pin: specifies the port bit to be written.
@@ -411,7 +411,7 @@ void GPIO_WriteBit(GPIO_TypeDef *GPIOx, uint16_t GPIO_Pin, BitAction BitVal)
   }
 }
 
-/**  修改完成@zhang
+/**  ??????@zhang
  * @brief  Writes data to the specified GPIO data port.
  * @param  GPIOx: where x can be (A, B, F) to select the GPIO peripheral.
  * @param  PortVal: specifies the value to be written to the port output data register.
@@ -441,7 +441,7 @@ void GPIO_Write(GPIO_TypeDef *GPIOx, uint16_t PortVal)
   * @{
   */
 
-/**   已修改@zhang
+/**   ?????@zhang
  * @brief  Writes data to the specified GPIO data port.
  * @param  GPIOx: where x can be (A  B  F) to select the GPIO peripheral.
  * @param  GPIO_PinSource: specifies the pin for the Alternate function.
@@ -489,11 +489,11 @@ void GPIO_PinAFConfig(GPIO_TypeDef *GPIOx, uint16_t GPIO_PinSource, uint8_t GPIO
   GPIOx->AFRH = tmp_2;
 }
 
-/**  已添加@zhang
+/**  ?????@zhang
   @brief GPIO drive capability configuration.
   @param  GPIO_Drive:
             @arg GPIO_Drive_Level_strong: strong current output.
-            @arg GPIO_Drive_Level_weak：thin	current output.
+            @arg GPIO_Drive_Level_weak??thin	current output.
 */
 void GPIO_DriveConfig(GPIO_TypeDef *GPIOx, uint16_t GPIO_Pin, uint16_t GPIO_Drive)
 {
@@ -515,7 +515,7 @@ void GPIO_DriveConfig(GPIO_TypeDef *GPIOx, uint16_t GPIO_Pin, uint16_t GPIO_Driv
   GPIOx->DR_BSRR = tmppreg;
 }
 
-/**   已添加@zhang
+/**   ?????@zhang
   @brief GPIO bit toggle
 */
 void GPIO_BitToggle(GPIO_TypeDef *GPIOx, uint16_t GPIO_Pin)
@@ -525,7 +525,7 @@ void GPIO_BitToggle(GPIO_TypeDef *GPIOx, uint16_t GPIO_Pin)
   GPIOx->BTGLR = GPIO_Pin;
 }
 
-/**  已添加@zhang
+/**  ?????@zhang
   @brief cmos input enable/disable
 */
 void GPIO_InputCMOSCmd(GPIO_TypeDef *GPIOx, uint16_t GPIO_Pin, FunctionalState NewState)
@@ -542,7 +542,7 @@ void GPIO_InputCMOSCmd(GPIO_TypeDef *GPIOx, uint16_t GPIO_Pin, FunctionalState N
   }
 }
 
-/**  已添加@zhang
+/**  ?????@zhang
   @brief Set to ana quickly
 */
 void gpio_ana_mode_set(GPIO_TypeDef *gpio_ptr, uint32_t port_num, uint32_t ae1, uint32_t ae2)

@@ -29,6 +29,7 @@
 #define LCA039_FLASH_LATENCY_MASK (0x7UL)
 #define LCA039_LVR_ENABLE (1UL)
 #define LCA039_LVR_LEVEL_2V5 (3UL << 1)
+#define LCA039_LVR_LEVEL_4V0 (7UL << 1)
 #define LCA039_LVR_LEVEL_MASK (0x7UL << 1)
 #define LCA039_LDO_DRIVER_200UA (3UL << 2)
 #define LCA039_LDO_DRIVER_MASK (3UL << 2)
@@ -94,6 +95,11 @@ static void LCA039_ConfigureHighSpeedPower(void)
 {
 #if LCA039_HIGH_SPEED_POWER_REQUIRED
     uint32_t value;
+#if LCA039_SYSCLK_HZ > 72000000UL
+    const uint32_t lvr_level = LCA039_LVR_LEVEL_4V0;
+#else
+    const uint32_t lvr_level = LCA039_LVR_LEVEL_2V5;
+#endif
 
     value = CHIPCTRL->LDOCR;
     value &= ~LCA039_LDO_DRIVER_MASK;
@@ -102,7 +108,7 @@ static void LCA039_ConfigureHighSpeedPower(void)
 
     value = CHIPCTRL->PWR_CFG;
     value &= ~LCA039_LVR_LEVEL_MASK;
-    value |= LCA039_LVR_ENABLE | LCA039_LVR_LEVEL_2V5;
+    value |= LCA039_LVR_ENABLE | lvr_level;
     LCA039_ChipCtrlWrite(&CHIPCTRL->PWR_CFG, value);
 
     /* 升到 64 MHz 及以上时先增强 LDO/LVR，按厂商时序等待电源监控稳定后再切高速。 */

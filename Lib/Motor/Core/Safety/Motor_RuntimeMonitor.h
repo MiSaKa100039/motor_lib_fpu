@@ -12,8 +12,9 @@ public:
     void check(const MotorLimitParam& limits,
                const MotorSensorParam& sensor,
                float ia, float ib, float ic,
-               float v_bus, const float temp[4],
-               State state, Fault* fault);
+               float i_bus, float v_bus, const float temp[4],
+               State state, Fault* fault,
+               MotorRuntimeFaultDetail* fault_detail = nullptr);
 
     /* 超速故障检查 (本轮新增)
      * @param max_speed_rpm  额定速度上限 (RPM)

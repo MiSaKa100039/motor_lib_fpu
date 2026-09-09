@@ -7,8 +7,8 @@
   * @brief   This file provides all the rcc emulation firmware functions.
   ******************************************************************************/
 /******************************************************************************
-NO_DEBUGMODE=1,表示正常工作模式，64M及以上主频强制开启LVR，
-NO_DEBUGMODE=0,表示调试模式，主频配置不开启LVR，
+NO_DEBUGMODE=1,???????????????64M???????????????LVR??
+NO_DEBUGMODE=0,?????????????????ò?????LVR??
 NO_DEBUGMODE=1: indicates the normal working mode. The LVR is forcibly enabled for 64M or higher main frequency.
 NO_DEBUGMODE=0: indicates the debugging mode. LVR is not enabled in the master frequency configuration.
 ************************************************************************************************************/
@@ -49,9 +49,12 @@ NO_DEBUGMODE=0: indicates the debugging mode. LVR is not enabled in the master f
 #include "lcm32f039_gpio.h"
 #include "lcm32f039_pwr.h"
 
+extern uint32_t SystemCoreClock;
+
 void delay10us(uint32_t u32Cnt)
 {
     uint32_t u32end;
+    uint32_t ticks_per_10us;
     uint32_t TempLoad;
     uint32_t TempVal;
     uint32_t TempCtrl;
@@ -63,45 +66,16 @@ void delay10us(uint32_t u32Cnt)
     SysTick->LOAD = 0xFFFFFF;
     SysTick->VAL = 0;
     SysTick->CTRL = SysTick_CTRL_CLKSOURCE_Msk | SysTick_CTRL_ENABLE_Msk;
-#if (HSI_SYSCLK_FREQ_8MHz | HSE_SYSCLK_FREQ_8MHz)
-    u32end = 0xFFFFB0; // 0x1000000 - SystemCoreClock/100000
-#endif
-#if (HSI_SYSCLK_FREQ_16MHz | HSE_SYSCLK_FREQ_16MHz)
-    u32end = 0xFFFF60; // 0x1000000 - SystemCoreClock/100000
-#endif
-#if (HSI_SYSCLK_FREQ_24MHz | HSE_SYSCLK_FREQ_24MHz)
-    u32end = 0xFFFF10; // 0x1000000 - SystemCoreClock/100000
-#endif
-#if (HSI_SYSCLK_FREQ_32MHz | HSE_SYSCLK_FREQ_32MHz)
-    u32end = 0xFFFEC0; // 0x1000000 - SystemCoreClock/100000
-#endif
-#if (HSI_SYSCLK_FREQ_40MHz | HSE_SYSCLK_FREQ_40MHz)
-    u32end = 0xFFFE70; // 0x1000000 - SystemCoreClock/100000
-#endif
-#if (HSI_SYSCLK_FREQ_48MHz | HSE_SYSCLK_FREQ_48MHz)
-    u32end = 0xFFFE20; // 0x1000000 - SystemCoreClock/100000
-#endif
-#if (HSI_SYSCLK_FREQ_56MHz | HSE_SYSCLK_FREQ_56MHz)
-    u32end = 0xFFFDD0; // 0x1000000 - SystemCoreClock/100000
-#endif
-#if (HSI_SYSCLK_FREQ_64MHz | HSE_SYSCLK_FREQ_56MHz)
-    u32end = 0xFFFD80; // 0x1000000 - SystemCoreClock/100000
-#endif
-#if (HSI_SYSCLK_FREQ_72MHz | HSE_SYSCLK_FREQ_72MHz)
-    u32end = 0xFFFD30; // 0x1000000 - SystemCoreClock/100000
-#endif
-#if (HSI_SYSCLK_FREQ_84MHz | HSE_SYSCLK_FREQ_84MHz)
-    u32end = 0xFFFCB8; // 0x1000000 - SystemCoreClock/100000
-#endif
-#if (HSI_SYSCLK_FREQ_88MHz | HSE_SYSCLK_FREQ_88MHz)
-    u32end = 0xFFFC90; // 0x1000000 - SystemCoreClock/100000
-#endif
-#if (HSI_SYSCLK_FREQ_92MHz | HSE_SYSCLK_FREQ_92MHz)
-    u32end = 0xFFFC68; // 0x1000000 - SystemCoreClock/100000
-#endif
-#if (HSI_SYSCLK_FREQ_96MHz | HSE_SYSCLK_FREQ_96MHz)
-    u32end = 0xFFFC40; // 0x1000000 - SystemCoreClock/100000
-#endif
+    ticks_per_10us = SystemCoreClock / 100000UL;
+    if (ticks_per_10us == 0UL)
+    {
+        ticks_per_10us = 1UL;
+    }
+    if (ticks_per_10us > 0xFFFFFFUL)
+    {
+        ticks_per_10us = 0xFFFFFFUL;
+    }
+    u32end = 0x1000000UL - ticks_per_10us;
     while (u32Cnt-- > 0)
     {
         SysTick->VAL = 0;
@@ -115,8 +89,8 @@ void delay10us(uint32_t u32Cnt)
     SysTick->CTRL = TempCtrl;
 }
 /*--------------------------------------------------------------------------------------------
-开OSCH晶振复用管脚： PF1 PF0
-Open crystal oscillator multiplexing pin： PF1 PF0
+??OSCH?????ù??? PF1 PF0
+Open crystal oscillator multiplexing pin?? PF1 PF0
   --------------------------------------------------------------------------------------------*/
 
 void OSCH_GPIO_INIT()
@@ -132,7 +106,7 @@ void OSCH_GPIO_INIT()
     GPIO_PinAFConfig(GPIOF, GPIO_PinSource1, GPIO_AF_2);
 }
 /*--------------------------------------------------------------------------------------------
-开OSCL晶振复用管脚： PA1 PA0
+??OSCL?????ù??? PA1 PA0
 Open crystal oscillator multiplexing pin: PA1 PA0
   --------------------------------------------------------------------------------------------*/
 
@@ -149,7 +123,7 @@ void OSCL_GPIO_INIT()
     GPIO_PinAFConfig(GPIOA, GPIO_PinSource1, GPIO_AF_2);
 }
 /*--------------------------------------------------------------------------------------------
-FLASH 取指延迟设置
+FLASH ?????????
 Setting the flash latency
   --------------------------------------------------------------------------------------------*/
 void FLASH_LATENCY(uint8_t clkrank)
@@ -169,7 +143,7 @@ void FLASH_LATENCY(uint8_t clkrank)
         break;
     }
 }
-/*运行中,变频之前 需要调用此函数
+/*??????,????? ???????????
 You need to call this function before running the frequency conversion*/
 void Sysclk_ResetRch(void)
 {
@@ -184,7 +158,7 @@ void Sysclk_ResetRch(void)
     FLASH_LATENCY(0);
 }
 
-// 内部晶振16MHZ 为基础/The internal crystal oscillator is 16MHZ based//
+// ???????16MHZ ?????/The internal crystal oscillator is 16MHZ based//
 void HSI_SetSysClockTo8()
 {
     FLASH_LATENCY(0); // 0:sysclk<32MHz 1:32<=sysclk<64Mhz  2:64<=sysclk<=96MHz
@@ -438,7 +412,7 @@ void HSI_SetSysClockTo96()
         ;
 }
 
-// 外部高振以16MHZ 为基础/The external high vibration is based on 16MHZ//
+// ????????16MHZ ?????/The external high vibration is based on 16MHZ//
 void HSE_SetSysClockTo8()
 {
     OSCH_GPIO_INIT();
@@ -865,13 +839,13 @@ void RCC_DeInit(void)
     CHIPCTRL->OSCH_CFG = 0x00000007;
     __dekey();
     chipctrl_access();
-    CHIPCTRL->BDCR_b.BDRST = 1; // 0：WT domain software not reset
+    CHIPCTRL->BDCR_b.BDRST = 1; // 0??WT domain software not reset
     __dekey();
     chipctrl_access();
     CHIPCTRL->BDCR = 0x00007004;
     __dekey();
     sysctrl_access();
-    SYSCTRL->ClkEnR0 = 0x00060000; // SRAM0、SRAM1 enable
+    SYSCTRL->ClkEnR0 = 0x00060000; // SRAM0??SRAM1 enable
     __dekey();
 }
 
@@ -896,7 +870,7 @@ void RCC_HSEConfig(uint8_t RCC_HSE)
         CHIPCTRL->CLK_CFG_b.OSCH_EN = RCC_HSE;
         __dekey();
     }
-    else // 打开OSCH 并开启 OSCH bypass. /Open the OSCH and enable OSCH bypass
+    else // ??OSCH ?????? OSCH bypass. /Open the OSCH and enable OSCH bypass
     {
         chipctrl_access();
         CHIPCTRL->CLK_CFG_b.OSCH_EN = RCC_HSE_ON;
@@ -914,7 +888,7 @@ void RCC_HSEConfig(uint8_t RCC_HSE)
  *          - SUCCESS: HSE oscillator is stable and ready to use
  *          - ERROR: HSE oscillator not yet ready
  */
-ErrorStatus RCC_WaitForHSEStartUp(void) //@zhang edit end。
+ErrorStatus RCC_WaitForHSEStartUp(void) //@zhang edit end??
 {
     __IO uint32_t StartUpCounter = 0;
     ErrorStatus status = ERROR;
@@ -1491,7 +1465,7 @@ void RCC_WTCLKConfig(uint32_t RCC_WTCLKSource)
     assert_param(IS_RCC_WTCLK_SOURCE(RCC_WTCLKSource));
     /* Select the RTC clock source */
     chipctrl_access();
-    CHIPCTRL->BDCR_b.WT_SEL = RCC_WTCLKSource; // 时钟源//RCL
+    CHIPCTRL->BDCR_b.WT_SEL = RCC_WTCLKSource; // ????//RCL
     __dekey();
 }
 /**
@@ -1917,7 +1891,7 @@ void RCC_APB1PeriphResetCmd(uint32_t RCC_APB1Periph, FunctionalState NewState)
  *          This parameter can be: ENABLE or DISABLE.
  * @retval None
  */
-void RCC_ITConfig(uint8_t RCC_IT, FunctionalState NewState) //@zhang 用来配置和晶振相关的中断
+void RCC_ITConfig(uint8_t RCC_IT, FunctionalState NewState) //@zhang ???????ú?????????ж?
 {
     /* Check the parameters */
     assert_param(IS_RCC_IT(RCC_IT));

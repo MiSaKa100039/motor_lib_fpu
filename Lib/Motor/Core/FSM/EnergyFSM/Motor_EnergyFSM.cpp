@@ -9,7 +9,7 @@
 #if LIB_MOTOR_ENABLE_BRAKE_ENERGY_FSM
 
 #include "../../Manager/Motor_Manager.h"
-#include "../../../Common/Limit/Motor_TargetLimiter.h"
+#include "../../Limit/Motor_TargetLimiter.h"
 
 #include <cmath>
 

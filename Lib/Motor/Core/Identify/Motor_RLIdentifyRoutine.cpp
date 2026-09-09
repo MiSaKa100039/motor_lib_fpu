@@ -186,7 +186,14 @@ void MotorRLIdentifyRoutine::fail(MotorManager& m, Fault fault, FailReason reaso
     phase_ = Phase::DONE;
     debug_snapshot_.last_fail_reason = reason;
     updateDebugSnapshot(std::isfinite(ctx.i_d) ? fabsf(ctx.i_d) : 0.0f);
-    m.stopForFault(fault);
+    if (fault == Fault::OVERCURRENT)
+    {
+        m.stopForFault(fault, MotorRuntimeFaultDetail::SOFTWARE_PHASE_OVERCURRENT);
+    }
+    else
+    {
+        m.stopForFault(fault);
+    }
 }
 
 bool MotorRLIdentifyRoutine::hardCurrentOk(MotorManager& m)
@@ -240,10 +247,11 @@ void MotorRLIdentifyRoutine::step(MotorManager& m)
         valid_repeat_count_ = 0U;
         rs_accum_ = 0.0f;
         ls_accum_ = 0.0f;
-        if (std::isfinite(cfg.limit.max_current_a) && cfg.limit.max_current_a > 0.0f)
+        if (std::isfinite(cfg.limit.max_phase_current_a) &&
+            cfg.limit.max_phase_current_a > 0.0f)
         {
             abort_current_ = minFloat(abort_current_,
-                                      cfg.limit.max_current_a * HARD_LIMIT_FACTOR);
+                                      cfg.limit.max_phase_current_a * HARD_LIMIT_FACTOR);
         }
 
         const float voltage_limit = identify.rl_injection_voltage_limit_v;
