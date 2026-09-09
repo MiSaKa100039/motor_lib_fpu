@@ -1,0 +1,17 @@
+/*********************************************************************
+* LCM32F039 TIM/ADC/VOFA target-test project
+*
+* Install the project-local J-Link device package before opening this
+* project. Build the TargetTimAdcVofa preset before loading this file.
+**********************************************************************
+*/
+
+void OnProjectLoad(void) {
+  Project.SetDevice ("LCM32F039");
+  Project.SetHostIF ("USB", "");
+  Project.SetTargetIF ("SWD");
+  Project.SetTIFSpeed ("1 MHz");
+  Project.SetJLinkLogFile("$(ProjectDir)/../build/TargetTimAdcVofa/LCA039_TargetTimAdcVofa_Ozone_JLink.log");
+  Project.AddSvdFile("$(ProjectDir)/LCM32F039.svd");
+  File.Open("$(ProjectDir)/../build/TargetTimAdcVofa/lca039_template.elf");
+}

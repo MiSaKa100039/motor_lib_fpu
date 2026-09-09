@@ -1,0 +1,17 @@
+/*********************************************************************
+* LCM32F039 Ozone download project
+*
+* Install the project-local J-Link device package before opening this
+* project. The registered CMSIS FLM programs internal Main Flash only.
+**********************************************************************
+*/
+
+void OnProjectLoad(void) {
+  Project.SetDevice ("LCM32F039");
+  Project.SetHostIF ("USB", "63728757");
+  Project.SetTargetIF ("SWD");
+  Project.SetTIFSpeed ("5 MHz");
+  Project.SetJLinkLogFile("$(ProjectDir)/../build/Debug/LCA039_Download_Ozone_JLink.log");
+  Project.AddSvdFile("$(ProjectDir)/LCM32F039.svd");
+  File.Open("$(ProjectDir)/../build/Debug/lca039_template.elf");
+}
