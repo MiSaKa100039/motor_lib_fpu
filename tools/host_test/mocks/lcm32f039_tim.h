@@ -6,7 +6,8 @@ constexpr uint32_t TIM_Channel_1 = 0, TIM_Channel_2 = 4, TIM_Channel_3 = 8;
 constexpr uint32_t TIM_CCx_Disable = 0, TIM_CCx_Enable = 1;
 constexpr uint32_t TIM_CCxN_Disable = 0, TIM_CCxN_Enable = 4;
 constexpr uint32_t TIM_OCPreload_Disable = 0, TIM_OCPreload_Enable = 8;
-constexpr uint32_t TIM_OCMode_PWM1 = 0x60, TIM_ForcedAction_InActive = 0x40;
+constexpr uint32_t TIM_OCMode_PWM1 = 0x60;
+constexpr uint32_t TIM_ForcedAction_InActive = 0x40, TIM_ForcedAction_Active = 0x50;
 constexpr uint32_t TIM_BDTR_MOE = 0x8000;
 constexpr uint32_t TIM_FLAG_Break = 0x80, TIM_FLAG_Break2 = 0x100;
 constexpr uint32_t ENABLE = 1, DISABLE = 0;
@@ -28,6 +29,28 @@ inline uint32_t mode(const TIM_TypeDef* t, unsigned i)
 {
     const uint32_t ccmr = i < 2 ? t->CCMR1 : t->CCMR2;
     return (ccmr >> ((i % 2) * 8)) & 0x70;
+}
+inline bool mainOutputActive(const TIM_TypeDef* t, unsigned i)
+{
+    const unsigned shift = i * 4;
+    const bool output_enabled = (t->BDTR & TIM_BDTR_MOE) != 0U &&
+                                (t->SR & (TIM_FLAG_Break | TIM_FLAG_Break2)) == 0U &&
+                                (t->CCER & (1U << shift)) != 0U;
+    const bool reference_active = mode(t, i) == TIM_ForcedAction_Active;
+    const bool polarity_inverted = (t->CCER & (2U << shift)) != 0U;
+    return output_enabled && (reference_active != polarity_inverted);
+}
+inline bool complementaryOutputActive(const TIM_TypeDef* t, unsigned i)
+{
+    const unsigned shift = i * 4;
+    const bool output_enabled = (t->BDTR & TIM_BDTR_MOE) != 0U &&
+                                (t->SR & (TIM_FLAG_Break | TIM_FLAG_Break2)) == 0U &&
+                                (t->CCER & (4U << shift)) != 0U;
+    bool reference_active = mode(t, i) == TIM_ForcedAction_Active;
+    const bool main_enabled = (t->CCER & (1U << shift)) != 0U;
+    if (main_enabled) reference_active = !reference_active;
+    const bool polarity_inverted = (t->CCER & (8U << shift)) != 0U;
+    return output_enabled && (reference_active != polarity_inverted);
 }
 inline void step(TIM_TypeDef* t)
 {
@@ -63,8 +86,13 @@ inline void compare(TIM_TypeDef* t, unsigned i, uint32_t v)
 inline void checkEnable(TIM_TypeDef* t, bool main)
 {
     // 任何功率使能都应发生在三相模式已全部恢复或全部强制无效之后。
-    const bool all_pwm = mode(t, 0) == 0x60 && mode(t, 1) == 0x60 && mode(t, 2) == 0x60;
-    const bool all_brake = mode(t, 0) == 0x40 && mode(t, 1) == 0x40 && mode(t, 2) == 0x40;
+    // 修正：仅使能互补通道的制动路径必须在三相全部强制有效后开放。
+    const bool all_pwm = mode(t, 0) == TIM_OCMode_PWM1 &&
+                         mode(t, 1) == TIM_OCMode_PWM1 &&
+                         mode(t, 2) == TIM_OCMode_PWM1;
+    const bool all_brake = mode(t, 0) == TIM_ForcedAction_Active &&
+                           mode(t, 1) == TIM_ForcedAction_Active &&
+                           mode(t, 2) == TIM_ForcedAction_Active;
     if (!(all_pwm || (!main && all_brake))) t->unsafe_enable = true;
     if (all_pwm && (t->active_compare[0] || t->active_compare[1] || t->active_compare[2]))
         t->unsafe_enable = true;

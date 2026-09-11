@@ -69,6 +69,10 @@ public:
 
     /* ==================== 目标值设置 ==================== */
     Result setTargetTorque(float current_a);          // 等价于 setpoint.mode=TORQUE, torque_ff=current
+    /* rpm 为用户逻辑正方向的机械转速；当前不接受负值。
+     * IF->SMO 策略下，STOP 时低于 acquire 门槛表示按完整 IF profile 启动并保持末段速度；
+     * 运行中低于该门槛的更新返回 InvalidParam，且不覆盖原目标。
+     */
     Result setTargetSpeed(float rpm);                 // 等价于 setpoint.mode=VELOCITY, vel_ff=rpm
     Result setTargetPosition(float angle_rad);        // 等价于 setpoint.mode=POSITION, pos_ref=angle
 

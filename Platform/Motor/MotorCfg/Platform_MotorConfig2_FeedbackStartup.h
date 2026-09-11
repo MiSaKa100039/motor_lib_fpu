@@ -9,10 +9,13 @@ namespace Platform_MotorConfig
 {
 
 /* ===================== [13] IF 启动 profile ===================== */
-/* 唯一启动曲线：正式 IF、Debug IF、Debug IF+观测器均引用此 profile。 */
+/* 正式 IF 启动曲线；调试 IF 使用 TestCfg 中的独立 profile。
+ * phase_count 决定实际执行的阶段；无目标启动完成交接后，速度环保持最后一个有效 Ramp 的 final_speed_rpm。
+ * 因此最后一个有效 Ramp 必须不低于 smo_handover.min_speed_rpm，且不得超过 max_speed_rpm。
+ */
 static volatile Lib_Motor::MotorIFStartupPhase Platform_NormalIFStartupPhases[] = {
-    Lib_Motor::MotorIFStartupPhase::Alignment(0.20f, 0.80f, 1.00f),
-    Lib_Motor::MotorIFStartupPhase::Ramp(1.00f,  80.0f, 0.20f, 0.40f),
+    Lib_Motor::MotorIFStartupPhase::Alignment(0.50f, 0.80f, 15.00f),
+    Lib_Motor::MotorIFStartupPhase::Ramp(1.50f,  400.0f, 0.00f, 10.0f),
     Lib_Motor::MotorIFStartupPhase::Ramp(2.00f, 200.0f, 0.00f, 0.70f),
     Lib_Motor::MotorIFStartupPhase::Ramp(2.00f, 400.0f, 0.00f, 1.00f),
     Lib_Motor::MotorIFStartupPhase::Ramp(1.50f, 600.0f, 0.00f, 1.20f),
@@ -20,7 +23,7 @@ static volatile Lib_Motor::MotorIFStartupPhase Platform_NormalIFStartupPhases[] 
 
 static Lib_Motor::MotorIFStartupProfile Platform_NormalIFStartupProfile = {
     Platform_NormalIFStartupPhases,
-    5U
+    2U
 };
 
 /* ===================== [8] 位置反馈 ===================== */
@@ -75,14 +78,28 @@ inline void ApplyFeedbackAndStartupConfig(Lib_Motor::MotorConfig& cfg)
 
     /* ===================== [11] 默认运行策略 ===================== */
     /*
-     * startup_source: 启动角度源
-     *   SENSOR → 有感启动 (编码器/HALL)
-     *   IF     → IF 开环拖动启动
-     *   HFI    → 高频注入启动
-     * steady_source: 稳态运行角度源 (需 BuildCfg 已编译对应算法)
-     * sensor_fault_action: 传感器故障时的处置策略
-     *   STOP → 立即停机
-     *   FALLBACK_IF → 切换到 IF 开环运行
+     * startup_source: 启动阶段建立电角度的来源。
+     *   SENSOR -> 由编码器/HALL 等转子传感器直接启动。
+     *   IF     -> 依次执行 if_startup_profile 的对齐与开环拖动阶段。
+     *   HFI    -> 高频注入低速启动；当前算法尚未实现且 BuildCfg 未编译，选择后会被配置校验拒绝。
+     *
+     * steady_source: 启动完成后真正参与 FOC 的角度与速度来源，需 BuildCfg 已编译对应算法。
+     *   SENSOR -> 始终使用外部转子传感器。
+     *   SMO    -> 当前仅支持 IF 启动后，经有效性和交接判据确认，再融合到 SMO。
+     *   其余无感源仍为预留项，配置校验不会允许进入运行。
+     *
+     * startup_auto_restart: IF profile 结束仍未完成 SMO 交接时，是否先 COAST 停机再自动重试。
+     *   false -> 立即报告 OBSERVER_LOSS，不执行自动重试。
+     *   true  -> 按下面的次数和等待时间重新执行完整 IF profile。
+     * startup_max_retry_count: 首次启动之外允许的额外重试次数；设为 3 表示最多共尝试 4 次。
+     *   startup_auto_restart=false 时该值不参与运行。
+     * startup_restart_interval_s: 每次失败进入 COAST/STOP 后，到重新启动 IF 的等待时间。
+     *
+     * sensor_fault_action: 仅处理 steady_source=SENSOR 时的外部转子传感器故障。
+     *   STOP                    -> 立即停机，当前唯一可执行的有感故障策略。
+     *   SWITCH_TO_CONVERGED_SMO -> 预留；当前有感配置校验会拒绝。
+     *   SWITCH_TO_HFI           -> 预留；当前有感配置校验会拒绝。
+     *   此字段不处理 SMO 失锁；SMO 失锁由 smo_validity 和 enable_auto_swap 决定。
     */
     cfg.default_run_policy.startup_source = Lib_Motor::StartupSource::IF;
     cfg.default_run_policy.steady_source = Lib_Motor::SteadyAngleSource::SMO;
@@ -139,7 +156,7 @@ inline void ApplyFeedbackAndStartupConfig(Lib_Motor::MotorConfig& cfg)
      *   hfi_pll_speed_limit_rad_s:    PLL 输出角速度限幅 (rad/s)，限制最大跟踪速率。
      *   hfi_prepare_speed_rpm:    低于该速度时允许提前启动/预热 HFI。
      *   hfi_disable_speed_rpm:    SMO 有效且高于该速度后允许关闭 HFI。
-     *   hfi_to_smo_rpm:           低速角度源加速后交接到高速观测器的阈值；当前高速源为 SMO，后续可替换为 EKF 等。
+     *   hfi_to_smo_rpm:           运行期自动切换预留阈值；首次 IF/HFI→SMO 交接不使用此项。
      *   hfi_speed_predict_time_s: 低速风险预测前视时间 (s)。
      *   hfi_voltage_ramp_time_s:  注入幅值斜坡时间 (s)。
      *   hfi_min_signal_level_a:   HFI 有效所需最小解调电流信号 (A)。
@@ -175,33 +192,70 @@ inline void ApplyFeedbackAndStartupConfig(Lib_Motor::MotorConfig& cfg)
 
     /* ===================== [15] SMO / 无感参数 ===================== */
     /*
-     * smo_gain:               滑模增益, 影响观测器收敛速度和抖振
-     * smo_pll_kp:                 PLL 锁相环比例增益, 跟踪反电势角度
-     * smo_pll_ki:                 PLL 锁相环积分增益
-     * smo_bemf_lpf_cutoff_hz:     滑模注入量提取反电势的一阶低通截止频率
-     * smo_min_signal_level:       SMO 有效所需最小反电势信号, 0 表示关闭
-     * switch_speed_rpm:       无感/有感切换速度 (RPM), 高于此值切换到 SMO
-     * hysteresis_rpm:         切换滞环 (RPM), 防止在切换点反复跳变
-     * max_handover_error_rad: 切换时最大允许角度误差 (rad), 超出则延迟切换
-     * convergence_ticks:      SMO 收敛所需 tick 数, 收敛前不切换
-     * smo_to_hfi_rpm:         SMO 低速有效性不足时主动降级到低速角度源的阈值；当前低速源为 HFI/IF 组合策略。
-     * switch_hysteresis_rpm:  观测器切换阈值迟滞 (RPM), 防边界抖动。
-     * switch_grace_time_s:    切回失败的超时窗口 (s), 超时置 Fault::OBSERVER_LOSS。
-     * enable_auto_swap:       关闭时维持 valid=false 即 Fault 老语义；打开后先尝试预防性降级。
+     * [SMO 动态参数]
+     * smo_gain: 滑模反馈增益。增大可增强电流误差校正，过小可能无法建立稳定反电势，
+     *   过大则更容易进入注入限幅并放大抖振与噪声。
+     * smo_pll_kp: PLL 比例增益，决定相位误差的即时修正强度。
+     *   增大可加快跟踪，但会放大反电势纹波并增加观测速度抖动。
+     * smo_pll_ki: PLL 积分增益，负责消除稳态相位/速度偏差。
+     *   过小会留下稳态误差，过大可能引起低频振荡或积分饱和。
+     * smo_bemf_lpf_cutoff_hz: 从滑模注入量提取反电势的一阶低通截止频率。
+     *   降低截止频率可抑制抖振，但会增加反电势相位滞后；提高则相反。
+     *
+     * [SMO 首次有效判定]
+     * acquire_min_speed_rpm: 观测器估算机械速度绝对值必须达到的下限；同时作为当前
+     *   IF->SMO 运行中速度目标的最低允许值。STOP 下低于该值表示按完整 IF profile 无目标启动。
+     * acquire_min_signal_level: ObserverSignalLevel 必须达到的反电势幅值下限；0 表示关闭幅值门槛。
+     * acquire_max_pll_error_rad: ObserverPllError 绝对值允许的上限，用于判断 PLL 自身是否锁定。
+     * acquire_ticks: 上述三项必须连续成立的控制周期数；任一项失败会将 ValidTicks 清零。
+     *   当前 600 tick 在 12 kHz 下为 50 ms，达到后锁存 observer_converged。
+     *
+     * [SMO 有效状态释放]
+     * release_min_speed_rpm / release_min_signal_level / release_max_pll_error_rad:
+     *   observer_converged 已锁存后使用的宽松保持门槛，构成相对 acquire 条件的迟滞。
+     * release_ticks: 宽松条件连续失败达到该周期数才撤销有效状态；条件恢复会清零 InvalidTicks。
+     *   当前 120 tick 在 12 kHz 下为 10 ms，避免单次噪声导致立即失锁。
+     *
+     * [IF -> SMO 交接与融合]
+     * smo_handover.min_speed_rpm: 允许交接的最低 SMO 估算机械转速，不替代 acquire 速度门槛；
+     *   IF profile 最后一个有效 Ramp 的 final_speed_rpm 必须达到该值。
+     * smo_handover.max_angle_error_rad: 方向和 π 分支修正后的 SMO 角度与当前 IF 控制角之间，
+     *   允许的最短圆周角差；它不同于 SMO 内部的 ObserverPllError。
+     * smo_handover.max_speed_error_rpm: SMO 估算速度与当前 IF 速度之间允许的最大差值。
+     * smo_handover.confirm_ticks: observer_converged、同方向、速度及角度条件连续成立的确认周期数；
+     *   任一交接条件失败即清零。当前 120 tick 在 12 kHz 下为 10 ms。
+     * smo_handover.blend_time_s: 交接确认后，将捕获的角度偏移衰减到零，并把速度从 IF 值
+     *   平滑插值到 SMO 值的持续时间；当前 0.05 s 对应约 600 tick。
+     * allow_smo_closed_loop: SMO 进入闭环的安全总开关。steady_source=SMO 时必须为 true，
+     *   否则在配置校验阶段拒绝启动，而不是只禁止最后一次角度切换。
+     *
+     * [稳态 SMO 失锁后的自动降级]
+     * smo_to_hfi_rpm: SMO 已失锁且打开自动切换后，判断是否允许回退低速源的基准速度。
+     * switch_hysteresis_rpm: 当前从上述基准值中减去，形成实际回退门槛；本配置为 420 rpm。
+     * switch_grace_time_s: 当前仅供 HFI 运行阶段的失效宽限窗口使用；HFI 未实现且未编译时无效。
+     * enable_auto_swap: false 时 SMO 撤销有效状态后直接报告 OBSERVER_LOSS；true 时仅在低于
+     *   回退门槛后尝试切到已编译的低速源，当前无 HFI 时回到 IF 并重新走 smo_handover。
+     * 当前真正可执行的首次交接只有 IF -> SMO；HFI -> SMO 虽复用交接入口，仍会被配置校验拒绝。
      */
     cfg.observer.smo_gain = 8.0f;
     cfg.observer.smo_pll_kp = 60.0f;
     cfg.observer.smo_pll_ki = 1200.0f;
-    cfg.observer.smo_bemf_lpf_cutoff_hz = 300.0f; // 400 rpm IF 对照试验，原值 1000 Hz。
-    cfg.observer.smo_min_signal_level = 0.0f;
-    /* [P4] 启动期 IF→SMO 单向加速切换 (旧 switch_speed_rpm/hysteresis_rpm)
-     * 仅 handleForceDrag 消费; 稳态加速交接阈值使用 HFI 段的 hfi_to_smo_rpm。 */
-    // 此值也用于 SMO 有效速度门槛，临时降至 300 rpm 以观察 400 rpm 收敛计数。
-    cfg.observer.hfi_to_smo_startup_rpm            = 300.0f;
-    cfg.observer.hfi_to_smo_startup_hysteresis_rpm = 50.0f;
-    cfg.observer.max_handover_error_rad = 0.35f;
-    cfg.observer.convergence_ticks = 100;
-    cfg.observer.allow_smo_closed_loop = false;
+    cfg.observer.smo_bemf_lpf_cutoff_hz = 300.0f;
+    cfg.observer.smo_validity.acquire_min_speed_rpm = 300.0f;
+    cfg.observer.smo_validity.acquire_min_signal_level = 5.0f;
+    cfg.observer.smo_validity.acquire_max_pll_error_rad = 0.35f;
+    cfg.observer.smo_validity.acquire_ticks = 600U; // 12 kHz 下 50 ms，覆盖 300 rpm 时一个电周期。
+    cfg.observer.smo_validity.release_min_speed_rpm = 250.0f;
+    cfg.observer.smo_validity.release_min_signal_level = 4.0f;
+    cfg.observer.smo_validity.release_max_pll_error_rad = 0.60f;
+    cfg.observer.smo_validity.release_ticks = 120U;
+
+    cfg.observer.smo_handover.min_speed_rpm = 350.0f;
+    cfg.observer.smo_handover.max_angle_error_rad = 0.35f;
+    cfg.observer.smo_handover.max_speed_error_rpm = 80.0f;
+    cfg.observer.smo_handover.confirm_ticks = 120U;
+    cfg.observer.smo_handover.blend_time_s = 0.05f;
+    cfg.observer.allow_smo_closed_loop = true;
     cfg.observer.smo_to_hfi_rpm        = 500.0f;
     cfg.observer.switch_hysteresis_rpm = 80.0f;
     cfg.observer.switch_grace_time_s   = 0.2f;

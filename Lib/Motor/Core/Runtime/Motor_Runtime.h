@@ -29,7 +29,6 @@ namespace Lib_Motor
     LIB_MOTOR_ENABLE_HFI || \
     LIB_MOTOR_ENABLE_DEBUG_HFI_ANY || \
     LIB_MOTOR_ENABLE_TORQUE_CONTROL || \
-    LIB_MOTOR_ENABLE_VELOCITY_CONTROL || \
     LIB_MOTOR_ENABLE_POSITION_CONTROL || \
     LIB_MOTOR_ENABLE_IMPEDANCE_CONTROL || \
     LIB_MOTOR_ENABLE_STALL_PROTECTION || \
@@ -166,8 +165,21 @@ struct RuntimeCtx
     RuntimeDuty max_duty = FixedNumeric::kQ15One;
     RuntimeVoltage current_pid_modulation_limit_q15 = FixedNumeric::kQ15One;
     RuntimeVoltage current_pid_output_limit_q15 = FixedNumeric::kQ15One;
-#if LIB_MOTOR_ENABLE_IF_STARTUP
-    RuntimeSpeed if_switch_up_speed_q15 = FixedNumeric::kQ15One;
+#if LIB_MOTOR_ENABLE_VELOCITY_CONTROL
+    std::uint32_t speed_slew_step_q31 = 0U;
+    std::uint16_t speed_slew_fraction_q16 = 0U;
+    RuntimeCurrent iq_drive_slew_step_q15 = 0;
+    RuntimeCurrent iq_brake_slew_step_q15 = 0;
+    RuntimeSpeed reverse_zero_band_q15 = 0;
+#endif
+#if LIB_MOTOR_ENABLE_SMO_OBSERVER
+    RuntimeSpeed smo_direction_deadband_q15 = 1;
+#endif
+#if LIB_MOTOR_ENABLE_SMO
+    RuntimeSpeed smo_handover_min_speed_q15 = FixedNumeric::kQ15One;
+    RuntimeSpeed smo_handover_max_speed_error_q15 = FixedNumeric::kQ15One;
+    std::uint32_t smo_handover_max_angle_error_phase = 0U;
+    RuntimeSpeed smo_auto_swap_fall_speed_q15 = 0;
 #endif
     FixedNumeric::SinCos angle_sin_cos{};
 

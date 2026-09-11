@@ -24,7 +24,8 @@ struct ObserverEstimate
     // --- 通用 ---
     float quality = 0.0f;            // 信号质量分 [0,1], = signal/min_signal_level
     uint16_t valid_ticks = 0U;       // 当前连续有效 tick 计数
-    bool valid = false;              // valid_ticks >= lock_ticks_ 时认定为有效
+    uint16_t invalid_ticks = 0U;     // 已锁定后连续违反释放条件的 tick 计数
+    bool valid = false;              // 带获取/释放滞回的最终有效状态
 };
 
 // fixed-q15 后端的观测器内部输出；转换到 float 只允许在 monitor/API 读取点发生。
@@ -36,6 +37,7 @@ struct ObserverEstimateQ15
     int16_t signal_level_q15 = 0;     // 反电势信号 / voltage_base
     int16_t quality_q15 = 0;          // 质量分 [0,1]
     uint16_t valid_ticks = 0U;
+    uint16_t invalid_ticks = 0U;
     bool valid = false;
 };
 

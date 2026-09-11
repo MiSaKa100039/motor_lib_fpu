@@ -1,6 +1,7 @@
 #include "Motor_Manager.h"
 
 #include "../FSM/Motor_FSM.h"
+#include "../Limit/Motor_TargetLimiter.h"
 #include "../../Control/Utils/FocMath.h"
 
 #include <cmath>
@@ -115,10 +116,39 @@ void MotorManager::init()
     event_       = MotorEvent();
 #if LIB_MOTOR_ENABLE_SMO_OBSERVER
     resetSmoAngleDirectionLatch();
+#if LIB_MOTOR_ENABLE_SMO
+    smo_handover_confirm_ticks_ = 0U;
+    smo_fusion_ticks_ = 0U;
+    smo_fusion_total_ticks_ =
+        (config_.observer.smo_handover.blend_time_s > 0.0f && dt_ > 0.0f)
+            ? static_cast<uint32_t>(
+                  config_.observer.smo_handover.blend_time_s / dt_ + 0.5f)
+            : 1U;
+    if (smo_fusion_total_ticks_ == 0U) smo_fusion_total_ticks_ = 1U;
+#if LIB_MOTOR_NUMERIC_BACKEND_FIXED_Q15
+    smo_fusion_angle_offset_q15_ = 0;
+    smo_fusion_progress_q15_ = 0U;
+    smo_fusion_step_q15_ = static_cast<uint16_t>(
+        32768UL / smo_fusion_total_ticks_);
+    smo_fusion_remainder_q15_ = 32768UL % smo_fusion_total_ticks_;
+    smo_fusion_remainder_accum_ = 0U;
+    smo_handover_angle_error_phase_ = 0U;
+#else
+    smo_fusion_angle_offset_rad_ = 0.0f;
+    smo_handover_angle_error_rad_ = 0.0f;
+#endif
+    smo_fusion_start_speed_ = 0;
+#endif
 #endif
     clearRuntimeFaultDetail();
     active_policy_ = config_.default_run_policy;
     pending_policy_ = config_.default_run_policy;
+#if LIB_MOTOR_ENABLE_IF_STARTUP && LIB_MOTOR_NUMERIC_BACKEND_FIXED_Q15
+    cacheIFStartupRestartInterval();
+#endif
+#if LIB_MOTOR_ENABLE_IF_STARTUP
+    if_profile_hold_target_ = false;
+#endif
 #if LIB_MOTOR_ENABLE_AUTO_IDENTIFY
     rl_identify_routine_.reset();
 #endif
@@ -247,8 +277,17 @@ void MotorManager::init()
      * [E] PID 控制器参数初始化 (从配置读取 KP/KI/KD/OutputLimit/RampRate)
      * ================================================================ */
     controller_.init(config_);
+#if LIB_MOTOR_ENABLE_VELOCITY_CONTROL
+    const float speed_pid_output_limit =
+        MotorTargetLimiter::configuredSpeedPidOutputLimit(config_);
+    controller_.setSpeedOutputLimit(speed_pid_output_limit);
+#endif
 #if LIB_MOTOR_NUMERIC_BACKEND_FIXED_Q15
     configureFixedCurrentPidRuntime(true);
+#if LIB_MOTOR_ENABLE_VELOCITY_CONTROL
+    controller_.syncFixedSpeedPid(
+        config_, dt_, speed_pid_output_limit);
+#endif
 #endif
 
     /* ================================================================
@@ -270,11 +309,16 @@ void MotorManager::init()
               config_.observer.smo_bemf_lpf_cutoff_hz);
 #endif
     smo_.setValidityCriteria(
-        // [P4] 启动期 IF→SMO 单向加速切换阈值 (旧 switch_speed_rpm)
-        config_.observer.hfi_to_smo_startup_rpm * TWO_PI * config_.physical.pole_pairs / 60.0f,
-        config_.observer.max_handover_error_rad,
-        config_.observer.convergence_ticks,
-        config_.observer.smo_min_signal_level);
+        config_.observer.smo_validity.acquire_min_speed_rpm *
+            TWO_PI * config_.physical.pole_pairs / 60.0f,
+        config_.observer.smo_validity.acquire_max_pll_error_rad,
+        config_.observer.smo_validity.acquire_ticks,
+        config_.observer.smo_validity.acquire_min_signal_level,
+        config_.observer.smo_validity.release_min_speed_rpm *
+            TWO_PI * config_.physical.pole_pairs / 60.0f,
+        config_.observer.smo_validity.release_max_pll_error_rad,
+        config_.observer.smo_validity.release_ticks,
+        config_.observer.smo_validity.release_min_signal_level);
 #endif
 #if LIB_MOTOR_ENABLE_HFI
     hfi_.init(config_.observer.hfi_injection_mode,
@@ -460,22 +504,32 @@ void MotorManager::serviceSlowMonitor()
 
 void MotorManager::requestStart()
 {
+#if LIB_MOTOR_NUMERIC_BACKEND_FIXED_Q15 && LIB_MOTOR_ENABLE_VELOCITY_CONTROL
+    ctx_.speed_slew_fraction_q16 = 0U;
+#endif
 #if LIB_MOTOR_ENABLE_IF_STARTUP
     clearStartupRestartState();
     if (active_policy_.startup_source == StartupSource::IF)
     {
+        if (target_mode_ == Mode::VELOCITY_CONTROL &&
+            active_policy_.steady_source == SteadyAngleSource::SMO &&
+            !if_profile_hold_target_)
+        {
+            const float target_rpm = runtimeSpeedToUserPhysical(
+                config_, ctx_, ctx_.target_rpm);
+            if (target_rpm >= 0.0f &&
+                target_rpm < config_.observer.smo_validity.acquire_min_speed_rpm)
+            {
+                if_profile_hold_target_ = true;
+            }
+        }
         resetIFStartupProfileState();
         resetIFStartupObserverState();
+        prepareIFStartupRuntimeForStart();
     }
 #endif
 #if LIB_MOTOR_ENABLE_SMO_OBSERVER
     resetSmoAngleDirectionLatch();
-#endif
-#if LIB_MOTOR_ENABLE_IF_STARTUP && LIB_MOTOR_NUMERIC_BACKEND_FIXED_Q15
-    if (active_policy_.startup_source == StartupSource::IF)
-    {
-        prepareIFStartupRuntimeForStart();
-    }
 #endif
 #if LIB_MOTOR_ENABLE_DEBUG_PROFILE_ANY && LIB_MOTOR_NUMERIC_BACKEND_FIXED_Q15
     prepareDebugOpenLoopAngleRampForStart();
@@ -687,11 +741,7 @@ void MotorManager::tick()
         constexpr bool is_rl_identify = false;
 #endif
 
-        if (mode_ != target_mode_ && validateModeSelection(target_mode_) != Result::Ok)
-        {
-            stopForFault(Fault::PARAM_ERROR);
-            return;
-        }
+        /* API 写入 target_mode_ 前已完成完整校验，快环只应用已验证的模式。 */
         mode_ = target_mode_;  // 强制执行: 由顶层命令驱动模式切换
 
 #if LIB_MOTOR_ENABLE_DEBUG_ANY
@@ -836,7 +886,8 @@ void MotorManager::tick()
 
         const bool valid = (ctx_.smo_estimate.valid &&
                             static_cast<uint32_t>(ctx_.smo_estimate.valid_ticks) >=
-                                2UL * static_cast<uint32_t>(config_.observer.convergence_ticks));
+                                2UL * static_cast<uint32_t>(
+                                    config_.observer.smo_validity.acquire_ticks));
         const float speed_abs = fabsf(runtimeSpeedToPhysical(ctx_, ctx_.speed_rpm));
         const float threshold = config_.observer.hfi_to_smo_rpm + config_.observer.switch_hysteresis_rpm;
         if (valid && speed_abs > threshold)

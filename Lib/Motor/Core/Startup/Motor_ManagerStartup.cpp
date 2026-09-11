@@ -256,13 +256,29 @@ void MotorManager::resetIFStartupObserverState()
 #if LIB_MOTOR_ENABLE_SMO_OBSERVER
     smo_.reset();
     resetSmoAngleDirectionLatch();
+#if LIB_MOTOR_ENABLE_SMO
+    smo_handover_confirm_ticks_ = 0U;
+    smo_fusion_ticks_ = 0U;
+#if LIB_MOTOR_NUMERIC_BACKEND_FIXED_Q15
+    smo_fusion_angle_offset_q15_ = 0;
+    smo_fusion_progress_q15_ = 0U;
+    smo_fusion_remainder_accum_ = 0U;
+    smo_handover_angle_error_phase_ = 0U;
+#else
+    smo_fusion_angle_offset_rad_ = 0.0f;
+    smo_handover_angle_error_rad_ = 0.0f;
+#endif
+    smo_fusion_start_speed_ = 0;
+#endif
 #if LIB_MOTOR_NUMERIC_BACKEND_FIXED_Q15
     ctx_.smo_estimate = ObserverEstimateQ15{};
+    ctx_.angle_elec_observer = 0U;
+    ctx_.speed_rpm_observer = 0;
 #else
     ctx_.smo_estimate = ObserverEstimate{};
-#endif
     ctx_.angle_elec_observer = runtimeAngleFromRadians(0.0f);
     ctx_.speed_rpm_observer = runtimeSpeedFromPhysical(ctx_, 0.0f);
+#endif
 #endif
     event_.observer_converged = 0U;
     event_.speed_valid = 0U;
@@ -893,10 +909,6 @@ void MotorManager::runIFControl()
 
 #if LIB_MOTOR_ENABLE_SMO_OBSERVER
     const bool run_smo_shadow =
-#if LIB_MOTOR_ENABLE_IF_STARTUP
-        (run_phase_ == RunPhase::FORCE_DRAG &&
-         active_policy_.steady_source == SteadyAngleSource::SMO) ||
-#endif
 #if LIB_MOTOR_ENABLE_DEBUG_IF_SMO_OBSERVER
         mode_ == Mode::DEBUG_IF_SMO_OBSERVER ||
 #endif
@@ -932,10 +944,6 @@ void MotorManager::runIFControl()
 
 #if LIB_MOTOR_ENABLE_SMO_OBSERVER
     const bool run_smo_shadow =
-#if LIB_MOTOR_ENABLE_IF_STARTUP
-        (run_phase_ == RunPhase::FORCE_DRAG &&
-         active_policy_.steady_source == SteadyAngleSource::SMO) ||
-#endif
 #if LIB_MOTOR_ENABLE_DEBUG_IF_SMO_OBSERVER
         mode_ == Mode::DEBUG_IF_SMO_OBSERVER ||
 #endif

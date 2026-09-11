@@ -297,7 +297,7 @@ enum class RunPhase : uint8_t
     /* --- 无感扩展 --- */
     HFI_ONLY,           // 纯高频注入 (零/低速)
     HFI_TRANS,          // HFI→SMO 渐变切换
-    FUSION,             // 多源角度平滑交接阶段 (预留)
+    FUSION,             // 启动角度源到 SMO 的平滑交接阶段
 
     /* --- 高级观测器 (预留) --- */
     BEMF_BASIC,         // 反电动势线性观测
@@ -710,7 +710,7 @@ constexpr MotorIFStartupPhase MotorIFStartupPhase::Ramp(float duration_s,
 struct MotorIFStartupProfile
 {
     const volatile MotorIFStartupPhase* phases; // IF 阶段数组
-    volatile uint8_t phase_count;               // 启用的阶段数量，可在调试器中临时修改
+    volatile uint8_t phase_count;               // Debug 可设 1 仅定位；正式 IF 至少为 2
 };
 
 /* ============================================================
@@ -808,6 +808,9 @@ enum class MotorTelemetryChannel : uint8_t
     ObserverQuality,
     ObserverValidTicks,
     ObserverConverged,
+    ObserverInvalidTicks,
+    SmoHandoverAngleError,
+    RunPhaseState,
 };
 
 /* ============================================================

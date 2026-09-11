@@ -34,13 +34,21 @@ set(CMAKE_ASM_FLAGS_INIT
 )
 
 set(CMAKE_C_FLAGS_DEBUG_INIT "-Og -g3 -gdwarf-4")
-set(CMAKE_C_FLAGS_RELWITHDEBINFO_INIT "-O2 -g3 -gdwarf-4")
+set(CMAKE_C_FLAGS_RELWITHDEBINFO_INIT "-Og -g3 -gdwarf-4 -DNDEBUG")
 
 set(CMAKE_CXX_FLAGS_DEBUG_INIT "-Og -g3 -gdwarf-4")
-set(CMAKE_CXX_FLAGS_RELWITHDEBINFO_INIT "-O2 -g3 -gdwarf-4")
+set(CMAKE_CXX_FLAGS_RELWITHDEBINFO_INIT "-Og -g3 -gdwarf-4 -DNDEBUG")
 
 set(CMAKE_ASM_FLAGS_DEBUG_INIT "-g3 -gdwarf-4")
-set(CMAKE_ASM_FLAGS_RELWITHDEBINFO_INIT "-g3 -gdwarf-4")
+set(CMAKE_ASM_FLAGS_RELWITHDEBINFO_INIT "-g3 -gdwarf-4 -DNDEBUG")
+if(CMAKE_BUILD_TYPE STREQUAL "RelWithDebInfo")
+    set(CMAKE_C_FLAGS_RELWITHDEBINFO "-Og -g3 -gdwarf-4 -DNDEBUG"
+        CACHE STRING "Flags used by the C compiler during RelWithDebInfo builds." FORCE)
+    set(CMAKE_CXX_FLAGS_RELWITHDEBINFO "-Og -g3 -gdwarf-4 -DNDEBUG"
+        CACHE STRING "Flags used by the CXX compiler during RelWithDebInfo builds." FORCE)
+    set(CMAKE_ASM_FLAGS_RELWITHDEBINFO "-g3 -gdwarf-4 -DNDEBUG"
+        CACHE STRING "Flags used by the ASM compiler during RelWithDebInfo builds." FORCE)
+endif()
 if(CMAKE_BUILD_TYPE STREQUAL "Release")
     set(CMAKE_C_FLAGS_RELEASE "-Os -g0 -DNDEBUG"
         CACHE STRING "Flags used by the C compiler during Release builds." FORCE)

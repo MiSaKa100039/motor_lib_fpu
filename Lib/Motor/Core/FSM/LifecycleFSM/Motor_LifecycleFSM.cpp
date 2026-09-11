@@ -173,10 +173,12 @@ void Motor_LifecycleFSM::handleStop(MotorManager& m)
     switch (classifyStartRequest(m))
     {
         case StartRequestKind::Control:
+#if !LIB_MOTOR_NUMERIC_BACKEND_FIXED_Q15
             if (!m.validateControlFeedbackSource())
             {
                 return;
             }
+#endif
             enterRun(m, static_cast<int>(Motor_RunPhaseFSM::selectInitialPhase(m, false)));
             return;
 

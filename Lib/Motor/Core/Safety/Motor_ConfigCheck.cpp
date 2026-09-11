@@ -95,9 +95,11 @@ bool validHfiParams(const MotorObserverParam& observer)
     }
 }
 
-bool validIFStartupProfileImpl(const MotorIFStartupProfile* profile)
+bool validIFStartupProfileImpl(const MotorIFStartupProfile* profile, bool require_ramp)
 {
-    if (profile == nullptr || profile->phases == nullptr || profile->phase_count < 2U ||
+    const uint8_t min_phase_count = require_ramp ? 2U : 1U;
+    if (profile == nullptr || profile->phases == nullptr ||
+        profile->phase_count < min_phase_count ||
         profile->phase_count > LIB_MOTOR_IF_PROFILE_MAX_PHASES ||
         profile->phase_count > LIB_MOTOR_DEBUG_IF_PROFILE_MAX_PHASES)
     {
@@ -184,7 +186,12 @@ bool validPhysicalElectricalParams(const MotorPhysicalParam& physical)
 
 bool MotorConfigCheck::validIFStartupProfile(const MotorIFStartupProfile* profile)
 {
-    return validIFStartupProfileImpl(profile);
+    return validIFStartupProfileImpl(profile, true);
+}
+
+bool MotorConfigCheck::validDebugIFStartupProfile(const MotorIFStartupProfile* profile)
+{
+    return validIFStartupProfileImpl(profile, false);
 }
 
 bool MotorConfigCheck::validSmoObserverParams(const MotorPhysicalParam& physical,
@@ -201,19 +208,39 @@ bool MotorConfigCheck::validSmoObserverParams(const MotorPhysicalParam& physical
            std::isfinite(observer.smo_pll_kp) &&
            std::isfinite(observer.smo_pll_ki) &&
            std::isfinite(observer.smo_bemf_lpf_cutoff_hz) &&
-           std::isfinite(observer.smo_min_signal_level) &&
-           std::isfinite(observer.hfi_to_smo_startup_rpm) &&
-           std::isfinite(observer.hfi_to_smo_startup_hysteresis_rpm) &&
-           std::isfinite(observer.max_handover_error_rad) &&
+           std::isfinite(observer.smo_validity.acquire_min_speed_rpm) &&
+           std::isfinite(observer.smo_validity.acquire_min_signal_level) &&
+           std::isfinite(observer.smo_validity.acquire_max_pll_error_rad) &&
+           std::isfinite(observer.smo_validity.release_min_speed_rpm) &&
+           std::isfinite(observer.smo_validity.release_min_signal_level) &&
+           std::isfinite(observer.smo_validity.release_max_pll_error_rad) &&
+           std::isfinite(observer.smo_handover.min_speed_rpm) &&
+           std::isfinite(observer.smo_handover.max_angle_error_rad) &&
+           std::isfinite(observer.smo_handover.max_speed_error_rpm) &&
+           std::isfinite(observer.smo_handover.blend_time_s) &&
            observer.smo_gain > 0.0f &&
            observer.smo_pll_kp >= 0.0f &&
            observer.smo_pll_ki >= 0.0f &&
            observer.smo_bemf_lpf_cutoff_hz > 0.0f &&
-           observer.smo_min_signal_level >= 0.0f &&
-           observer.hfi_to_smo_startup_rpm >= 0.0f &&
-           observer.hfi_to_smo_startup_hysteresis_rpm >= 0.0f &&
-           observer.max_handover_error_rad > 0.0f &&
-           observer.convergence_ticks > 0U;
+           observer.smo_validity.acquire_min_speed_rpm >= 0.0f &&
+           observer.smo_validity.acquire_min_signal_level >= 0.0f &&
+           observer.smo_validity.acquire_max_pll_error_rad > 0.0f &&
+           observer.smo_validity.acquire_ticks > 0U &&
+           observer.smo_validity.release_min_speed_rpm >= 0.0f &&
+           observer.smo_validity.release_min_speed_rpm <=
+               observer.smo_validity.acquire_min_speed_rpm &&
+           observer.smo_validity.release_min_signal_level >= 0.0f &&
+           observer.smo_validity.release_min_signal_level <=
+               observer.smo_validity.acquire_min_signal_level &&
+           observer.smo_validity.release_max_pll_error_rad >=
+               observer.smo_validity.acquire_max_pll_error_rad &&
+           observer.smo_validity.release_ticks > 0U &&
+           observer.smo_handover.min_speed_rpm >=
+               observer.smo_validity.acquire_min_speed_rpm &&
+           observer.smo_handover.max_angle_error_rad > 0.0f &&
+           observer.smo_handover.max_speed_error_rpm >= 0.0f &&
+           observer.smo_handover.confirm_ticks > 0U &&
+           observer.smo_handover.blend_time_s > 0.0f;
 }
 
 Fault MotorConfigCheck::validateBuildConfig(MotorConfigFaultDetail* detail)
@@ -999,16 +1026,14 @@ Fault MotorConfigCheck::validateFeedback(const MotorHardwareConfig& hardware,
                                   Fault::OBSERVER_UNAVAILABLE,
                                   MotorConfigFaultDetail::FEEDBACK_SMO_CLOSED_LOOP_DISABLED);
             }
-            if (!validSmoObserverParams(hardware.physical, algorithm.observer) ||
-                algorithm.observer.hfi_to_smo_startup_rpm <=
-                    algorithm.observer.hfi_to_smo_startup_hysteresis_rpm)
+            if (!validSmoObserverParams(hardware.physical, algorithm.observer))
             {
                 return configFail(detail,
                                   Fault::PARAM_ERROR,
                                   MotorConfigFaultDetail::FEEDBACK_SMO_PARAM_INVALID);
             }
 
-switch (policy.startup_source)
+            switch (policy.startup_source)
             {
                 case StartupSource::IF:
                     if (!std::isfinite(policy.startup_restart_interval_s) ||
@@ -1018,6 +1043,22 @@ switch (policy.startup_source)
                         return configFail(detail,
                                           Fault::PARAM_ERROR,
                                           MotorConfigFaultDetail::FEEDBACK_IF_PARAM_INVALID);
+                    }
+
+                    {
+                        const MotorIFStartupProfile* profile =
+                            algorithm.observer.if_startup_profile;
+                        const volatile MotorIFStartupPhase& final_phase =
+                            profile->phases[profile->phase_count - 1U];
+                        if (final_phase.final_speed_rpm <
+                                algorithm.observer.smo_handover.min_speed_rpm ||
+                            final_phase.final_speed_rpm > hardware.limit.max_speed_rpm)
+                        {
+                            return configFail(
+                                detail,
+                                Fault::PARAM_ERROR,
+                                MotorConfigFaultDetail::FEEDBACK_IF_PARAM_INVALID);
+                        }
                     }
 
                     return configPass(detail);

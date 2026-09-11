@@ -141,10 +141,35 @@ void Motor_AngleFSM::useSmoSource(MotorManager& m)
     m.ctx_.angle_elec_observer =
         m.correctSmoAngleForControl(m.ctx_.smo_estimate.angle_phase,
                                     m.ctx_.speed_rpm_observer);
-    m.ctx_.angle_elec = m.ctx_.angle_elec_observer;
-    m.ctx_.speed_rpm = m.ctx_.speed_rpm_observer;
     m.event_.observer_converged = m.ctx_.smo_estimate.valid ? 1U : 0U;
     m.event_.speed_valid = m.ctx_.smo_estimate.valid ? 1U : 0U;
+    if (m.run_phase_ == RunPhase::FORCE_DRAG ||
+        m.run_phase_ == RunPhase::HFI_ONLY)
+    {
+        // 启动阶段只更新 SMO 候选值，不覆盖当前启动角度源。
+        m.angle_state_ = AngleState::SMO;
+        return;
+    }
+    if (m.run_phase_ == RunPhase::FUSION)
+    {
+        const uint16_t progress = m.smo_fusion_progress_q15_;
+        const uint16_t remaining = static_cast<uint16_t>(32768U - progress);
+        const int32_t angle_offset_q15 =
+            FixedNumeric::scaleSignedByUnsignedQ15(
+                m.smo_fusion_angle_offset_q15_, remaining);
+        m.ctx_.angle_elec = m.ctx_.angle_elec_observer +
+            (static_cast<uint32_t>(angle_offset_q15) << 16U);
+        const int32_t speed_delta =
+            static_cast<int32_t>(m.ctx_.speed_rpm_observer) -
+            static_cast<int32_t>(m.smo_fusion_start_speed_);
+        m.ctx_.speed_rpm = FixedNumeric::saturateQ15(
+            static_cast<int32_t>(m.smo_fusion_start_speed_) +
+            FixedNumeric::scaleSignedByUnsignedQ15(speed_delta, progress));
+        m.angle_state_ = AngleState::FUSION;
+        return;
+    }
+    m.ctx_.angle_elec = m.ctx_.angle_elec_observer;
+    m.ctx_.speed_rpm = m.ctx_.speed_rpm_observer;
     m.angle_state_ = AngleState::SMO;
 #else
     float angle_rad = m.ctx_.angle_elec_observer;
@@ -158,10 +183,33 @@ void Motor_AngleFSM::useSmoSource(MotorManager& m)
         (TWO_PI * m.config_.physical.pole_pairs);
     m.ctx_.angle_elec_observer =
         m.correctSmoAngleForControl(angle_rad, m.ctx_.speed_rpm_observer);
-    m.ctx_.angle_elec = m.ctx_.angle_elec_observer;
-    m.ctx_.speed_rpm = m.ctx_.speed_rpm_observer;
     m.event_.observer_converged = m.ctx_.smo_estimate.valid ? 1U : 0U;
     m.event_.speed_valid = m.ctx_.smo_estimate.valid ? 1U : 0U;
+    if (m.run_phase_ == RunPhase::FORCE_DRAG ||
+        m.run_phase_ == RunPhase::HFI_ONLY)
+    {
+        // 启动阶段只更新 SMO 候选值，不覆盖当前启动角度源。
+        m.angle_state_ = AngleState::SMO;
+        return;
+    }
+    if (m.run_phase_ == RunPhase::FUSION)
+    {
+        const uint32_t total =
+            (m.smo_fusion_total_ticks_ > 0U) ? m.smo_fusion_total_ticks_ : 1U;
+        const uint32_t elapsed =
+            (m.smo_fusion_ticks_ < total) ? m.smo_fusion_ticks_ : total;
+        const float ratio = static_cast<float>(elapsed) / static_cast<float>(total);
+        m.ctx_.angle_elec = m.ctx_.angle_elec_observer +
+            m.smo_fusion_angle_offset_rad_ * (1.0f - ratio);
+        while (m.ctx_.angle_elec >= TWO_PI) m.ctx_.angle_elec -= TWO_PI;
+        while (m.ctx_.angle_elec < 0.0f) m.ctx_.angle_elec += TWO_PI;
+        m.ctx_.speed_rpm = m.smo_fusion_start_speed_ +
+            (m.ctx_.speed_rpm_observer - m.smo_fusion_start_speed_) * ratio;
+        m.angle_state_ = AngleState::FUSION;
+        return;
+    }
+    m.ctx_.angle_elec = m.ctx_.angle_elec_observer;
+    m.ctx_.speed_rpm = m.ctx_.speed_rpm_observer;
     m.angle_state_ = AngleState::SMO;
 
     /* === [P2] Ke 同步预留 ===
@@ -170,7 +218,8 @@ void Motor_AngleFSM::useSmoSource(MotorManager& m)
      */
     if (m.ctx_.smo_estimate.valid &&
         static_cast<uint32_t>(m.ctx_.smo_estimate.valid_ticks) >=
-            2UL * static_cast<uint32_t>(m.config_.observer.convergence_ticks))
+            2UL * static_cast<uint32_t>(
+                m.config_.observer.smo_validity.acquire_ticks))
     {
         const float speed_abs_rpm = fabsf(m.ctx_.speed_rpm);
         const float threshold =

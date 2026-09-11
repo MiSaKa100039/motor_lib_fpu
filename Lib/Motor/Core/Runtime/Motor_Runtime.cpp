@@ -67,6 +67,24 @@ std::uint32_t positiveFloatToUInt32(float value, std::uint32_t fallback)
     return static_cast<std::uint32_t>(value + 0.5f);
 }
 
+std::uint32_t positiveFloatToQ31Step(float value)
+{
+    if (!std::isfinite(value) || value <= 0.0f)
+    {
+        return 0U;
+    }
+    /* 正斜率至少保留一个 Q31 LSB, 避免低速斜坡被量化成“关闭”。 */
+    if (value < 1.0f)
+    {
+        return 1U;
+    }
+    if (value > 4294967040.0f)
+    {
+        return 4294967295UL;
+    }
+    return static_cast<std::uint32_t>(value + 0.5f);
+}
+
 float phaseCurrentScalePerCount(const MotorConfig& cfg)
 {
     const float adc_res = cfg.sensor.adc_resolution;
@@ -124,6 +142,70 @@ FixedNumeric::q15_t modulationKmodQ15(ModulationMethod method)
         default:
             return 18919;
     }
+}
+
+FixedNumeric::q15_t slewQ15(FixedNumeric::q15_t current,
+                            FixedNumeric::q15_t target,
+                            FixedNumeric::q15_t max_delta)
+{
+    if (max_delta <= 0) return target;
+    const std::int32_t delta =
+        static_cast<std::int32_t>(target) - static_cast<std::int32_t>(current);
+    if (delta > max_delta)
+    {
+        return FixedNumeric::saturateQ15(
+            static_cast<std::int32_t>(current) + max_delta);
+    }
+    if (delta < -static_cast<std::int32_t>(max_delta))
+    {
+        return FixedNumeric::saturateQ15(
+            static_cast<std::int32_t>(current) - max_delta);
+    }
+    return target;
+}
+
+FixedNumeric::q15_t slewSpeedQ15(FixedNumeric::q15_t current,
+                                 FixedNumeric::q15_t target,
+                                 std::uint32_t step_q31,
+                                 std::uint16_t& fraction_q16)
+{
+    if (current == target)
+    {
+        fraction_q16 = 0U;
+        return target;
+    }
+    if (step_q31 == 0U)
+    {
+        fraction_q16 = 0U;
+        return target;
+    }
+
+    const std::uint32_t fraction_sum =
+        static_cast<std::uint32_t>(fraction_q16) + (step_q31 & 0xFFFFUL);
+    const std::uint32_t max_delta_q15 =
+        (step_q31 >> 16U) + (fraction_sum >> 16U);
+    fraction_q16 = static_cast<std::uint16_t>(fraction_sum & 0xFFFFUL);
+
+    if (max_delta_q15 == 0U)
+    {
+        return current;
+    }
+
+    const std::int32_t delta =
+        static_cast<std::int32_t>(target) - static_cast<std::int32_t>(current);
+    const std::uint32_t delta_abs = (delta < 0)
+        ? static_cast<std::uint32_t>(-delta)
+        : static_cast<std::uint32_t>(delta);
+    if (delta_abs <= max_delta_q15)
+    {
+        fraction_q16 = 0U;
+        return target;
+    }
+
+    const std::int32_t signed_step = static_cast<std::int32_t>(max_delta_q15);
+    return FixedNumeric::saturateQ15(
+        static_cast<std::int32_t>(current) +
+        ((delta > 0) ? signed_step : -signed_step));
 }
 
 } // namespace
@@ -217,12 +299,55 @@ void MotorManager::configureFixedRuntimeScales()
     ctx_.current_pid_output_limit_q15 =
         FixedNumeric::multiplyQ15(ctx_.v_bus,
                                   ctx_.current_pid_modulation_limit_q15);
-#if LIB_MOTOR_ENABLE_IF_STARTUP
-    ctx_.if_switch_up_speed_q15 = FixedNumeric::absoluteQ15(
+#if LIB_MOTOR_ENABLE_VELOCITY_CONTROL
+    const float speed_base_rpm = runtimeSpeedBaseRpm(ctx_);
+    const float speed_slew_step_q31 =
+        (config_.motion.speed_slew_rate_rpm_s > 0.0f && speed_base_rpm > 0.0f)
+            ? (config_.motion.speed_slew_rate_rpm_s * dt_ /
+               speed_base_rpm * 2147483648.0f)
+            : 0.0f;
+    ctx_.speed_slew_step_q31 = positiveFloatToQ31Step(speed_slew_step_q31);
+    ctx_.speed_slew_fraction_q16 = 0U;
+    ctx_.iq_drive_slew_step_q15 =
+        (config_.motion.iq_slew_rate_a_per_s > 0.0f)
+            ? FixedNumeric::absoluteQ15(runtimeCurrentFromPhysical(
+                  ctx_, config_.motion.iq_slew_rate_a_per_s * dt_))
+            : 0;
+    const float brake_slew =
+        (config_.motion.iq_slew_rate_brake_a_per_s > 0.0f)
+            ? config_.motion.iq_slew_rate_brake_a_per_s
+            : config_.motion.iq_slew_rate_a_per_s;
+    ctx_.iq_brake_slew_step_q15 =
+        (brake_slew > 0.0f)
+            ? FixedNumeric::absoluteQ15(runtimeCurrentFromPhysical(
+                  ctx_, brake_slew * dt_))
+            : 0;
+    ctx_.reverse_zero_band_q15 = FixedNumeric::absoluteQ15(
+        runtimeSpeedFromPhysical(ctx_, config_.motion.reverse_zero_band_rpm));
+#endif
+#if LIB_MOTOR_ENABLE_SMO_OBSERVER
+    ctx_.smo_direction_deadband_q15 = FixedNumeric::absoluteQ15(
+        runtimeSpeedFromPhysical(ctx_, config_.motion.reverse_zero_band_rpm));
+    if (ctx_.smo_direction_deadband_q15 == 0)
+    {
+        ctx_.smo_direction_deadband_q15 = 1;
+    }
+#endif
+#if LIB_MOTOR_ENABLE_SMO
+    ctx_.smo_handover_min_speed_q15 = FixedNumeric::absoluteQ15(
+        runtimeSpeedFromPhysical(ctx_, config_.observer.smo_handover.min_speed_rpm));
+    ctx_.smo_handover_max_speed_error_q15 = FixedNumeric::absoluteQ15(
         runtimeSpeedFromPhysical(
-            ctx_,
-            config_.observer.hfi_to_smo_startup_rpm +
-            config_.observer.hfi_to_smo_startup_hysteresis_rpm));
+            ctx_, config_.observer.smo_handover.max_speed_error_rpm));
+    ctx_.smo_handover_max_angle_error_phase = FixedNumeric::phaseFromRadians(
+        config_.observer.smo_handover.max_angle_error_rad);
+    const float auto_swap_fall_speed =
+        config_.observer.smo_to_hfi_rpm - config_.observer.switch_hysteresis_rpm;
+    ctx_.smo_auto_swap_fall_speed_q15 =
+        (auto_swap_fall_speed > 0.0f)
+            ? FixedNumeric::absoluteQ15(
+                  runtimeSpeedFromPhysical(ctx_, auto_swap_fall_speed))
+            : 0;
 #endif
 }
 
@@ -327,16 +452,7 @@ int8_t MotorManager::updateSmoAngleDirectionLatch(RuntimeSpeed direction_hint)
 {
 #if LIB_MOTOR_NUMERIC_BACKEND_FIXED_Q15
     RuntimeSpeed candidate = direction_hint;
-    RuntimeSpeed deadband =
-        runtimeSpeedFromPhysical(ctx_, config_.motion.reverse_zero_band_rpm);
-    if (deadband < 0)
-    {
-        deadband = static_cast<RuntimeSpeed>(-deadband);
-    }
-    if (deadband == 0)
-    {
-        deadband = 1;
-    }
+    const RuntimeSpeed deadband = ctx_.smo_direction_deadband_q15;
 
     if (FixedNumeric::absoluteQ15(candidate) < deadband)
     {
@@ -404,6 +520,9 @@ void MotorManager::clearControlTargets()
     ctx_.target_iq = 0;
     ctx_.target_id = 0;
     ctx_.pending_reverse_rpm = 0;
+#if LIB_MOTOR_ENABLE_IF_STARTUP
+    if_profile_hold_target_ = false;
+#endif
 #if LIB_MOTOR_ENABLE_SMO_OBSERVER
     resetSmoAngleDirectionLatch();
 #endif
@@ -418,6 +537,9 @@ void MotorManager::clearDerivedTargets()
      * 通常在模式切换或停止时调用, 清零 intermediate 值
      */
     ctx_.speed_ref_limited = 0;
+#if LIB_MOTOR_NUMERIC_BACKEND_FIXED_Q15 && LIB_MOTOR_ENABLE_VELOCITY_CONTROL
+    ctx_.speed_slew_fraction_q16 = 0U;
+#endif
     ctx_.speed_pid_iq = 0;
 ctx_.iq_ref_command = 0;
     ctx_.iq_ref_limited = 0;
@@ -468,16 +590,50 @@ ctx_.iq_ref_command = 0;
 RuntimeCurrent MotorManager::computeIqReference()
 {
 #if LIB_MOTOR_NUMERIC_BACKEND_FIXED_Q15
-    /*
-     * fixed-q15 固件当前只放开 debug PWM/VF/current-lock/plain IF。
-     * 速度环、位置环、能量策略和堵转保护尚未完成 q15 版本，BuildCfg 已拦截。
-     * 本函数仅保留误入闭环时的安全清零路径，避免把 float 限幅器带入 tick。
-     */
-    ctx_.speed_ref_limited = 0;
-    ctx_.speed_pid_iq = 0;
-    ctx_.iq_ref_command = 0;
-    ctx_.iq_ref_limited = 0;
-    return 0;
+#if LIB_MOTOR_ENABLE_VELOCITY_CONTROL
+    if (mode_ == Mode::VELOCITY_CONTROL)
+    {
+        if (ctx_.pending_reverse_rpm != 0 &&
+            FixedNumeric::absoluteQ15(ctx_.speed_rpm) <= ctx_.reverse_zero_band_q15)
+        {
+            ctx_.target_rpm = ctx_.pending_reverse_rpm;
+            ctx_.pending_reverse_rpm = 0;
+        }
+
+        ctx_.speed_ref_limited = slewSpeedQ15(
+            ctx_.speed_ref_limited,
+            ctx_.target_rpm,
+            ctx_.speed_slew_step_q31,
+            ctx_.speed_slew_fraction_q16);
+        const RuntimeSpeed speed_error =
+            FixedNumeric::subtractQ15(ctx_.speed_ref_limited, ctx_.speed_rpm);
+        ctx_.speed_pid_iq = controller_.updateFixedSpeedQ15(speed_error, false);
+        ctx_.iq_ref_command = ctx_.speed_pid_iq;
+    }
+    else
+#endif
+    {
+        ctx_.speed_ref_limited = 0;
+#if LIB_MOTOR_ENABLE_VELOCITY_CONTROL
+        ctx_.speed_slew_fraction_q16 = 0U;
+#endif
+        ctx_.speed_pid_iq = 0;
+        ctx_.iq_ref_command = ctx_.target_iq;
+    }
+
+    RuntimeCurrent requested_iq = clampCurrentTargetQ15(ctx_.iq_ref_command);
+#if LIB_MOTOR_ENABLE_VELOCITY_CONTROL
+    const bool braking =
+        (ctx_.iq_ref_limited > 0 && requested_iq < ctx_.iq_ref_limited) ||
+        (ctx_.iq_ref_limited < 0 && requested_iq > ctx_.iq_ref_limited);
+    const RuntimeCurrent slew_step = braking
+        ? ctx_.iq_brake_slew_step_q15
+        : ctx_.iq_drive_slew_step_q15;
+    requested_iq = slewQ15(ctx_.iq_ref_limited, requested_iq, slew_step);
+#endif
+    ctx_.iq_ref_limited = requested_iq;
+    energy_state_ = (requested_iq == 0) ? EnergyState::IDLE : EnergyState::DRIVE;
+    return requested_iq;
 #else
 #if LIB_MOTOR_ENABLE_STALL_PROTECTION
     const float iq_limit = MotorTargetLimiter::configuredIqLimit(config_);  // 最大 Iq 限幅 (从 motion/motor/hard_limit 读取)
@@ -623,19 +779,33 @@ RuntimeCurrent MotorManager::computeIqReference()
 void MotorManager::runControlLoop()
 {
 #if LIB_MOTOR_NUMERIC_BACKEND_FIXED_Q15
-    /*
-     * fixed-q15 的普通 FOC 闭环尚未完成全路径定点化。
-     * 若配置误入这里，保持输出为零并锁定故障，防止软浮点路径混入 ISR。
-     */
-    controller_.resetCurrentPid();
-    ctx_.i_d = 0;
-    ctx_.i_q = 0;
-    ctx_.v_d = 0;
-    ctx_.v_q = 0;
-    ctx_.v_alpha = 0;
-    ctx_.v_beta = 0;
-    setPwmDutyQ15(FixedNumeric::DutyAbc{0, 0, 0});
-    setFault(Fault::OBSERVER_UNAVAILABLE);
+    const RuntimeCurrent id_ref = clampCurrentTargetQ15(ctx_.target_id);
+    const RuntimeCurrent iq_ref = computeIqReference();
+    ctx_.angle_sin_cos = FixedNumeric::sinCos(ctx_.angle_elec);
+
+    const FixedNumeric::Dq current_dq = FixedNumeric::park(
+        FixedNumeric::Ab{ctx_.i_alpha, ctx_.i_beta}, ctx_.angle_sin_cos);
+    ctx_.i_d = current_dq.d;
+    ctx_.i_q = current_dq.q;
+
+    refreshFixedCurrentPidOutputLimit();
+    const FixedNumeric::Dq voltage_dq{
+        controller_.updateFixedCurrentD(
+            FixedNumeric::subtractQ15(id_ref, current_dq.d)),
+        controller_.updateFixedCurrentQ(
+            FixedNumeric::subtractQ15(iq_ref, current_dq.q))};
+    ctx_.v_d = voltage_dq.d;
+    ctx_.v_q = voltage_dq.q;
+
+    const FixedNumeric::Ab voltage_ab =
+        FixedNumeric::inversePark(voltage_dq, ctx_.angle_sin_cos);
+    ctx_.v_alpha = voltage_ab.alpha;
+    ctx_.v_beta = voltage_ab.beta;
+    const FixedNumeric::DutyAbc duty =
+        (config_.control.modulation == ModulationMethod::SPWM)
+            ? FixedNumeric::spwmVbusNormalized(voltage_ab)
+            : FixedNumeric::svpwmVbusNormalized(voltage_ab);
+    setPwmDutyQ15(duty);
     publishRuntimeOutputs();
     return;
 #else

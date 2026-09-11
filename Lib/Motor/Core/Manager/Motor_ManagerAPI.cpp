@@ -1,5 +1,7 @@
 #include "Motor_Manager.h"
 
+#include <cmath>
+
 namespace Lib_Motor
 {
 
@@ -195,34 +197,52 @@ bool buildIFProfileSnapshot(const MotorIFStartupProfile* profile,
 } // namespace
 #endif
 
-/* setTargetSpeed -- 直接覆盖速度目标值 (RPM), 仅写目标, 不切模式
+/* setTargetSpeed -- 校验并写入用户机械转速目标, 不切换控制模式。
  *
- * 跨零软减速 (本轮新增):
- *   若新 rpm 与当前 target_rpm 反号 且 当前实测速度 |ω| > reverse_zero_band_rpm,
- *   表示用户在大速度时直接给反向指令; 为避免"目标跨零直跳"造成的电流冲击
- *   与 SMO 跨零失效, 先写 0 让速度环减速到接近 0, 下一拍再写实际 rpm。
- *   通过 ctx_.pending_reverse_rpm 暂存待执行的目标。
+ * 当前 IF -> SMO 无低速角度源:
+ *   - STOP 下 [0, acquire_min_speed_rpm) 表示本次按 IF profile 最终速度启动并保持。
+ *   - RUN 下同一范围无可靠 SMO 角度, 拒绝且保留原目标。
+ *   - API 负方向在 HFI/顺逆风重启链补齐前保持禁用；实际物理方向由 command_direction 映射。
  */
-void MotorManager::setTargetSpeed(float rpm)
+Result MotorManager::setTargetSpeed(float rpm)
 {
-    const float internal_rpm = runtimeUserSpeedToInternalPhysical(config_, rpm);
-    const float current_target = runtimeSpeedToPhysical(ctx_, ctx_.target_rpm);
-    const bool sign_flip = (current_target * internal_rpm < 0.0f);  // 反号
-    const bool fast_running =
-        fabsf(runtimeSpeedToPhysical(ctx_, ctx_.speed_rpm)) >
-        config_.motion.reverse_zero_band_rpm;
-
-    if (sign_flip && fast_running)
+    if (!std::isfinite(rpm) || rpm < 0.0f ||
+        !(config_.limit.max_speed_rpm > 0.0f) ||
+        rpm > config_.limit.max_speed_rpm)
     {
-        // 暂存反向目标, 当前 target 写 0 (速度环会把速度带到 0)
-        ctx_.pending_reverse_rpm = runtimeSpeedFromPhysical(ctx_, internal_rpm);
-        ctx_.target_rpm = 0;
-        syncRuntimeTargets();
-        return;
+        return Result::InvalidParam;
     }
 
-    ctx_.target_rpm = runtimeSpeedFromPhysical(ctx_, internal_rpm);
+#if LIB_MOTOR_ENABLE_IF_STARTUP && LIB_MOTOR_ENABLE_SMO
+    const bool uses_if_smo_velocity =
+        target_mode_ == Mode::VELOCITY_CONTROL &&
+        active_policy_.startup_source == StartupSource::IF &&
+        active_policy_.steady_source == SteadyAngleSource::SMO;
+    if (uses_if_smo_velocity &&
+        rpm < config_.observer.smo_validity.acquire_min_speed_rpm)
+    {
+        if (state_ != State::STOP)
+        {
+            return Result::InvalidParam;
+        }
+
+        if_profile_hold_target_ = true;
+        ctx_.target_rpm = 0;
+        ctx_.pending_reverse_rpm = 0;
+        syncRuntimeTargets();
+        return Result::Ok;
+    }
+
+    if (uses_if_smo_velocity)
+    {
+        if_profile_hold_target_ = false;
+    }
+#endif
+
+    ctx_.target_rpm = runtimeSpeedFromUserPhysical(config_, ctx_, rpm);
+    ctx_.pending_reverse_rpm = 0;
     syncRuntimeTargets();
+    return Result::Ok;
 }
 
 /* setTargetTorque -- 直接覆盖 Q 轴电流目标 (A), 仅写目标, 不切模式 */
@@ -251,7 +271,7 @@ void MotorManager::setTargetId(float current_a)
  * 注: 本版仅写目标字段, 不消费 vel_ff/torque_ff/stiffness/damping;
  *     IMPEDANCE 控制环、位置 FF 在 Phase 2 实现 (RuntimeCtx 扩展)。
  */
-void MotorManager::applySetpoint(const MotionSetpoint& sp)
+Result MotorManager::applySetpoint(const MotionSetpoint& sp)
 {
     /* TODO HostTest: writeSetpoint 各 mode 字段落地 (TORQUE→target_iq / VELOCITY→target_rpm /
      *                POSITION→target_pos_rad + vel_ff_rad_s / IMPEDANCE→imp_*) 未编单测,
@@ -262,8 +282,14 @@ void MotorManager::applySetpoint(const MotionSetpoint& sp)
             ctx_.target_iq = runtimeCurrentFromPhysical(ctx_, sp.torque_ff);
             break;
         case Mode::VELOCITY_CONTROL:
-            ctx_.target_rpm = runtimeSpeedFromUserPhysical(config_, ctx_, sp.vel_ff);
+        {
+            const Result result = setTargetSpeed(sp.vel_ff);
+            if (result != Result::Ok)
+            {
+                return result;
+            }
             break;
+        }
 #if LIB_MOTOR_ENABLE_POSITION_CONTROL
         case Mode::POSITION_CONTROL:
             ctx_.target_pos_rad = sp.pos_ref;
@@ -291,12 +317,17 @@ void MotorManager::applySetpoint(const MotionSetpoint& sp)
             break;
     }
     syncRuntimeTargets();
+    return Result::Ok;
 }
 
 /* writeSetpoint: 外部流式入口, 记录流状态后复用内部目标落地路径。 */
-void MotorManager::writeSetpoint(const MotionSetpoint& sp)
+Result MotorManager::writeSetpoint(const MotionSetpoint& sp)
 {
-    applySetpoint(sp);
+    const Result result = applySetpoint(sp);
+    if (result != Result::Ok)
+    {
+        return result;
+    }
 
 #if LIB_MOTOR_ENABLE_STREAM_HOLD_WHEN_IDLE
     ctx_.last_setpoint_tick = fsmTimerTicks();
@@ -306,6 +337,7 @@ void MotorManager::writeSetpoint(const MotionSetpoint& sp)
     {
         stream_state_ = StreamState::ACTIVE;
     }
+    return Result::Ok;
 }
 
 /*
@@ -365,7 +397,7 @@ void MotorManager::serviceSetpointPlayback()
         (setpoint_fifo_head_ + 1U) % LIB_MOTOR_SETPOINT_FIFO_CAPACITY);
     --setpoint_fifo_count_;
 
-    applySetpoint(sp);
+    (void)applySetpoint(sp);
 #if LIB_MOTOR_ENABLE_STREAM_HOLD_WHEN_IDLE
     ctx_.last_setpoint_tick = fsmTimerTicks();
 #endif
@@ -654,7 +686,8 @@ void MotorManager::clearDebugStartupProfiles()
 }
 #endif
 
-#if LIB_MOTOR_ENABLE_IF_STARTUP && LIB_MOTOR_NUMERIC_BACKEND_FIXED_Q15
+#if LIB_MOTOR_ENABLE_IF_STARTUP
+#if LIB_MOTOR_NUMERIC_BACKEND_FIXED_Q15
 bool MotorManager::prepareIFStartupProfileSnapshot(const MotorIFStartupProfile* profile)
 {
     return buildIFProfileSnapshot(profile,
@@ -666,17 +699,49 @@ bool MotorManager::prepareIFStartupProfileSnapshot(const MotorIFStartupProfile* 
                                   dt_);
 }
 
+void MotorManager::cacheIFStartupRestartInterval()
+{
+    startup_restart_interval_ticks_ = profileSecondsToTicks(
+        active_policy_.startup_restart_interval_s, dt_);
+}
+#endif
+
 void MotorManager::prepareIFStartupRuntimeForStart()
 {
     resetIFStartupProfileState();
+#if LIB_MOTOR_NUMERIC_BACKEND_FIXED_Q15
+    cacheIFStartupRestartInterval();
+#endif
 
     if (active_policy_.startup_source != StartupSource::IF)
     {
+#if LIB_MOTOR_NUMERIC_BACKEND_FIXED_Q15
         ctx_.if_profile_phase_count = 0U;
+#endif
         return;
     }
 
+#if LIB_MOTOR_NUMERIC_BACKEND_FIXED_Q15
     prepareIFStartupProfileSnapshot(config_.observer.if_startup_profile);
+    if (if_profile_hold_target_ && ctx_.if_profile_phase_count > 0U)
+    {
+        ctx_.target_rpm =
+            ctx_.if_profile_phases[ctx_.if_profile_phase_count - 1U].final_speed_rpm;
+        ctx_.pending_reverse_rpm = 0;
+    }
+#else
+    const MotorIFStartupProfile* profile = config_.observer.if_startup_profile;
+    if (if_profile_hold_target_ && profile != nullptr &&
+        profile->phases != nullptr && profile->phase_count > 0U)
+    {
+        const volatile MotorIFStartupPhase& final_phase =
+            profile->phases[profile->phase_count - 1U];
+        ctx_.target_rpm = runtimeSpeedFromUserPhysical(
+            config_, ctx_, final_phase.final_speed_rpm);
+        ctx_.pending_reverse_rpm = 0.0f;
+    }
+#endif
+    syncRuntimeTargets();
 }
 #endif
 

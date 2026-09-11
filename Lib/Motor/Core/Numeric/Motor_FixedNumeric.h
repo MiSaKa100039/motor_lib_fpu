@@ -71,6 +71,20 @@ constexpr q15_t multiplyQ15(q15_t lhs, q15_t rhs)
     return saturateQ15((product < 0) ? -rounded : rounded);
 }
 
+/* value 约束在 [-65535, 65535]，factor 取 [0, 32768]。 */
+constexpr std::int32_t scaleSignedByUnsignedQ15(std::int32_t value,
+                                                std::uint16_t factor)
+{
+    const bool negative = value < 0;
+    const std::uint32_t magnitude = negative
+        ? (0U - static_cast<std::uint32_t>(value))
+        : static_cast<std::uint32_t>(value);
+    const std::uint32_t product = magnitude * static_cast<std::uint32_t>(factor);
+    const std::int32_t rounded =
+        static_cast<std::int32_t>((product + 16384U) >> 15U);
+    return negative ? -rounded : rounded;
+}
+
 constexpr q15_t absoluteQ15(q15_t value)
 {
     return (value == static_cast<q15_t>(-32768)) ? kQ15One

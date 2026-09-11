@@ -73,9 +73,6 @@ inline void ApplyBasicConfig(Lib_Motor::MotorConfig& cfg)
      */
     cfg.sensor.has_bus_voltage = true;
 
-    // cfg.sensor.vbus_r_up = 470000.0f;
-    // cfg.sensor.vbus_r_down = 100000.0f;
-
     cfg.sensor.vbus_r_up = 220000.0f;
     cfg.sensor.vbus_r_down = 10000.0f;
 
@@ -120,8 +117,8 @@ inline void ApplyBasicConfig(Lib_Motor::MotorConfig& cfg)
      *                  (1) cfg.motion.max_iq_ref_a > 0 → 优先用 max_iq_ref_a
      *                  (2) max_iq_ref_a = 0 时回退用 rated_current
      *                  (3) rated_current = 0 时回退用 limit.max_phase_current_a (相线软件保护)
-     *                - 本工程 max_iq_ref_a=5.0f 已填, rated_current 不参与日常限幅;
-     *                  仅当 max_iq_ref_a=0 时作为兜底, 保留字段不删除。
+     *                - 本工程在运动软限幅配置中填写 max_iq_ref_a, rated_current
+     *                  仅在该值为 0 时作为兜底, 保留字段不删除。
      * rated_voltage: 电机额定电压 (V), 不是实时母线电压
      *                优先级说明:
      *                - 仅在 RL 辨识时 vbus 采样=0 兜底用 (Motor_RLIdentifyRoutine.cpp);
@@ -225,9 +222,9 @@ inline void ApplyBasicConfig(Lib_Motor::MotorConfig& cfg)
      * under_voltage_v: 初始化采样完成后母线低于此值立即锁欠压故障
      * max_duty_cycle:  调制比上限, 留出 ADC 采样和死区余量
      */
-    cfg.limit.max_phase_current_a = 50.0f;
-    cfg.limit.max_bus_current_a = 50.0f;
-    cfg.limit.max_speed_rpm = 5000.0f;
+    cfg.limit.max_phase_current_a = 100.0f;
+    cfg.limit.max_bus_current_a = 100.0f;
+    cfg.limit.max_speed_rpm = 3000.0f;
     cfg.limit.over_voltage_v = 24.0f;
     cfg.limit.under_voltage_v = 8.0f;
     cfg.limit.max_duty_cycle = 0.90f;

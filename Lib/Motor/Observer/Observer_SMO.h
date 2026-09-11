@@ -97,7 +97,11 @@ public:
     void setValidityCriteria(float min_elec_speed_rad_s,
                              float max_pll_error_rad,
                              uint16_t convergence_ticks,
-                             float min_signal_level)
+                             float min_signal_level,
+                             float release_min_elec_speed_rad_s,
+                             float release_max_pll_error_rad,
+                             uint16_t release_ticks,
+                             float release_min_signal_level)
     {
         convergence_ticks_ = convergence_ticks > 0U ? convergence_ticks : 1U;
         if (std::isfinite(min_elec_speed_rad_s) &&
@@ -128,6 +132,34 @@ public:
             (std::isfinite(min_signal_level) && min_signal_level > 0.0f)
                 ? FixedNumeric::fromPhysical(min_signal_level, voltage_base_v_)
                 : 0;
+
+        release_ticks_ = release_ticks > 0U ? release_ticks : 1U;
+        if (std::isfinite(release_min_elec_speed_rad_s) &&
+            release_min_elec_speed_rad_s > 0.0f &&
+            speed_base_rpm_ > 0.0f)
+        {
+            constexpr float kTwoPi = 6.28318530717958647692f;
+            const float min_mech_rpm =
+                release_min_elec_speed_rad_s * 60.0f /
+                (kTwoPi * static_cast<float>(pole_pairs_));
+            release_min_speed_q15_ =
+                FixedNumeric::absoluteQ15(FixedNumeric::fromPhysical(
+                    min_mech_rpm, speed_base_rpm_));
+        }
+        else
+        {
+            release_min_speed_q15_ = 0;
+        }
+        release_max_pll_error_q15_ =
+            FixedNumeric::absoluteQ15(radiansToPiQ15(release_max_pll_error_rad));
+        if (release_max_pll_error_q15_ == 0)
+        {
+            release_max_pll_error_q15_ = 1;
+        }
+        release_min_signal_level_q15_ =
+            (std::isfinite(release_min_signal_level) && release_min_signal_level > 0.0f)
+                ? FixedNumeric::fromPhysical(release_min_signal_level, voltage_base_v_)
+                : 0;
     }
 
     const ObserverEstimateQ15& estimate() const
@@ -142,6 +174,8 @@ public:
         pll_integral_speed_q35_ = 0;
         last_pll_error_q15_ = 0;
         valid_ticks_ = 0U;
+        invalid_ticks_ = 0U;
+        valid_latched_ = false;
         i_alpha_est_ = 0;
         i_beta_est_ = 0;
         bemf_alpha_lpf_.resetQ15(0);
@@ -221,11 +255,11 @@ public:
             FixedNumeric::absoluteQ15(last_pll_error_q15_);
         const bool signal_ok =
             (min_signal_level_q15_ <= 0) || (signal_level >= min_signal_level_q15_);
-        const bool candidate =
+        const bool acquire_candidate =
             speed_abs >= min_valid_speed_q15_ &&
             signal_ok &&
             error_abs <= max_valid_pll_error_q15_;
-        if (candidate)
+        if (acquire_candidate)
         {
             if (valid_ticks_ < 0xFFFFU)
             {
@@ -235,6 +269,36 @@ public:
         else
         {
             valid_ticks_ = 0U;
+        }
+
+        if (!valid_latched_)
+        {
+            invalid_ticks_ = 0U;
+            valid_latched_ = valid_ticks_ >= convergence_ticks_;
+        }
+        else
+        {
+            const bool release_signal_ok =
+                (release_min_signal_level_q15_ <= 0) ||
+                (signal_level >= release_min_signal_level_q15_);
+            const bool retain_candidate =
+                speed_abs >= release_min_speed_q15_ &&
+                release_signal_ok &&
+                error_abs <= release_max_pll_error_q15_;
+            if (retain_candidate)
+            {
+                invalid_ticks_ = 0U;
+            }
+            else if (invalid_ticks_ < 0xFFFFU)
+            {
+                ++invalid_ticks_;
+            }
+
+            if (invalid_ticks_ >= release_ticks_)
+            {
+                valid_latched_ = false;
+                valid_ticks_ = 0U;
+            }
         }
 
         fillEstimate(estimate_out, signal_level);
@@ -376,7 +440,8 @@ private:
         last_estimate_.signal_level_q15 = signal_level;
         last_estimate_.quality_q15 = computeQuality(speed_abs, error_abs, signal_level);
         last_estimate_.valid_ticks = valid_ticks_;
-        last_estimate_.valid = valid_ticks_ >= convergence_ticks_;
+        last_estimate_.invalid_ticks = invalid_ticks_;
+        last_estimate_.valid = valid_latched_;
         if (estimate_out != nullptr)
         {
             *estimate_out = last_estimate_;
@@ -567,6 +632,12 @@ private:
     FixedNumeric::q15_t min_signal_level_q15_ = 0;
     uint16_t convergence_ticks_ = 1U;
     uint16_t valid_ticks_ = 0U;
+    FixedNumeric::q15_t release_min_speed_q15_ = 0;
+    FixedNumeric::q15_t release_max_pll_error_q15_ = FixedNumeric::kQ15One;
+    FixedNumeric::q15_t release_min_signal_level_q15_ = 0;
+    uint16_t release_ticks_ = 1U;
+    uint16_t invalid_ticks_ = 0U;
+    bool valid_latched_ = false;
 
     FixedNumeric::phase_u32_t angle_est_phase_ = 0U;
     FixedNumeric::q15_t speed_est_q15_ = 0;
@@ -645,12 +716,21 @@ public:
     void setValidityCriteria(float min_elec_speed_rad_s,
                              float max_pll_error_rad,
                              uint16_t convergence_ticks,
-                             float min_signal_level)
+                             float min_signal_level,
+                             float release_min_elec_speed_rad_s,
+                             float release_max_pll_error_rad,
+                             uint16_t release_ticks,
+                             float release_min_signal_level)
     {
         min_valid_speed_rad_s_ = min_elec_speed_rad_s;
         max_valid_pll_error_rad_ = max_pll_error_rad;
         convergence_ticks_ = convergence_ticks;
         min_signal_level_ = min_signal_level > 0.0f ? min_signal_level : 0.0f;
+        release_min_speed_rad_s_ = release_min_elec_speed_rad_s;
+        release_max_pll_error_rad_ = release_max_pll_error_rad;
+        release_ticks_ = release_ticks > 0U ? release_ticks : 1U;
+        release_min_signal_level_ =
+            release_min_signal_level > 0.0f ? release_min_signal_level : 0.0f;
     }
 
     const ObserverEstimate& estimate() const
@@ -664,6 +744,8 @@ public:
         speed_est_    = 0.0f;
         pll_integral_ = 0.0f;
         valid_ticks_  = 0U;
+        invalid_ticks_ = 0U;
+        valid_latched_ = false;
         last_pll_error_rad_ = 0.0f;
         i_alpha_est_ = 0.0f;
         i_beta_est_ = 0.0f;
@@ -680,6 +762,8 @@ public:
         speed_est_    = 0.0f;
         pll_integral_ = 0.0f;
         valid_ticks_  = 0U;
+        invalid_ticks_ = 0U;
+        valid_latched_ = false;
         last_pll_error_rad_ = 0.0f;
         i_alpha_est_ = 0.0f;
         i_beta_est_ = 0.0f;
@@ -793,11 +877,11 @@ public:
         const float error_abs = fabsf(last_pll_error_rad_);
         const bool signal_ok =
             (min_signal_level_ <= 0.0f) || (signal_level >= min_signal_level_);
-        const bool candidate =
+        const bool acquire_candidate =
             speed_abs >= min_valid_speed_rad_s_ &&
             signal_ok &&
             error_abs <= max_valid_pll_error_rad_;
-        if (candidate)
+        if (acquire_candidate)
         {
             if (valid_ticks_ < 0xFFFFU)
             {
@@ -809,6 +893,35 @@ public:
             valid_ticks_ = 0U;    // 失效则清零
         }
 
+        if (!valid_latched_)
+        {
+            invalid_ticks_ = 0U;
+            valid_latched_ = valid_ticks_ >= convergence_ticks_;
+        }
+        else
+        {
+            const bool release_signal_ok =
+                (release_min_signal_level_ <= 0.0f) ||
+                (signal_level >= release_min_signal_level_);
+            const bool retain_candidate =
+                speed_abs >= release_min_speed_rad_s_ &&
+                release_signal_ok &&
+                error_abs <= release_max_pll_error_rad_;
+            if (retain_candidate)
+            {
+                invalid_ticks_ = 0U;
+            }
+            else if (invalid_ticks_ < 0xFFFFU)
+            {
+                ++invalid_ticks_;
+            }
+            if (invalid_ticks_ >= release_ticks_)
+            {
+                valid_latched_ = false;
+                valid_ticks_ = 0U;
+            }
+        }
+
 // [7] 填充输出结构体
         if (estimate_out != nullptr)
         {
@@ -818,7 +931,8 @@ public:
             estimate_out->signal_level = signal_level;
             estimate_out->quality = computeQuality(speed_abs, error_abs, signal_level);
             estimate_out->valid_ticks = valid_ticks_;
-            estimate_out->valid = valid_ticks_ >= convergence_ticks_;
+            estimate_out->invalid_ticks = invalid_ticks_;
+            estimate_out->valid = valid_latched_;
             last_estimate_ = *estimate_out;
         }
 
@@ -862,7 +976,8 @@ private:
         estimate_out->signal_level = signal_level;
         estimate_out->quality = 0.0f;
         estimate_out->valid_ticks = valid_ticks_;
-        estimate_out->valid = false;
+        estimate_out->invalid_ticks = invalid_ticks_;
+        estimate_out->valid = valid_latched_;
         last_estimate_ = *estimate_out;
     }
 
@@ -963,6 +1078,12 @@ private:
     float min_signal_level_ = 0.0f;
     uint16_t convergence_ticks_ = 1U;       // 需要的连续有效tick数
     uint16_t valid_ticks_ = 0U;             // 当前连续有效tick计数
+    float release_min_speed_rad_s_ = 0.0f;
+    float release_max_pll_error_rad_ = 3.14159265358979323846f;
+    float release_min_signal_level_ = 0.0f;
+    uint16_t release_ticks_ = 1U;
+    uint16_t invalid_ticks_ = 0U;
+    bool valid_latched_ = false;
 
 /* --- 输出缓存 --- */
     ObserverEstimate last_estimate_;  // 最近一次估计结果缓�?

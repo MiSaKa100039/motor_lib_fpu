@@ -37,3 +37,13 @@ extern volatile Lib_Motor::MotorVFStartupPhase Platform_TestVFStartupPhases[];
 extern Lib_Motor::MotorVFStartupProfile Platform_TestVFStartupProfile;
 #endif
 
+/*
+ * IF 开环启动调试 (Debug IF / Debug IF+SMO / Debug IF+HFI):
+ *   使用独立于 MotorCfg 正式启动参数的测试曲线。
+ *   调试完成后需由用户手动将确认过的参数复制到 MotorCfg。
+ */
+#if LIB_MOTOR_ENABLE_DEBUG_IF_ANY
+extern volatile Lib_Motor::MotorIFStartupPhase Platform_TestIFStartupPhases[];
+extern Lib_Motor::MotorIFStartupProfile Platform_TestIFStartupProfile;
+#endif
+

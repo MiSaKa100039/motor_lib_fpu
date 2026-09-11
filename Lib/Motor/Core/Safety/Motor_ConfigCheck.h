@@ -40,8 +40,11 @@ public:
     static bool validSmoObserverParams(const MotorPhysicalParam& physical,
                                        const MotorObserverParam& observer);
 
-    /* validIFStartupProfile -- 校验 IF 对齐首段和后续拖动段 */
+    /* validIFStartupProfile -- 校验正式 IF 对齐首段和至少一个后续拖动段 */
     static bool validIFStartupProfile(const MotorIFStartupProfile* profile);
+
+    /* validDebugIFStartupProfile -- Debug IF 允许仅启用首个对齐段 */
+    static bool validDebugIFStartupProfile(const MotorIFStartupProfile* profile);
 
     /* validateInitConfig -- 总入口: 依次调用 BuildConfig/Base/Feedback/TargetMode 全量校验 */
     static Fault validateInitConfig(const MotorConfig& cfg,

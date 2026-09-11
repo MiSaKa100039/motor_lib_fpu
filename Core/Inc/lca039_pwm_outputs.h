@@ -67,9 +67,10 @@ static inline void LCA039_PWM_BrakeLow(TIM_TypeDef* timer, bool allowed)
     }
 
     /* 高边关闭且 OCxREF 强制无效，只使能高电平有效的互补低边输出。 */
-    TIM_ForcedOC1Config(timer, TIM_ForcedAction_InActive);
-    TIM_ForcedOC2Config(timer, TIM_ForcedAction_InActive);
-    TIM_ForcedOC3Config(timer, TIM_ForcedAction_InActive);
+    /* 修正：仅使能 OCxN 时输出不取反，必须强制 OCxREF 有效才能拉高 LIN。 */
+    TIM_ForcedOC1Config(timer, TIM_ForcedAction_Active);
+    TIM_ForcedOC2Config(timer, TIM_ForcedAction_Active);
+    TIM_ForcedOC3Config(timer, TIM_ForcedAction_Active);
     TIM_SetCompare1(timer, 0U);
     TIM_SetCompare2(timer, 0U);
     TIM_SetCompare3(timer, 0U);

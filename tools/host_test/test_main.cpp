@@ -160,10 +160,11 @@ MOTOR_TEST(command_direction_maps_api_speed_and_public_telemetry)
 
     MotorManager manager(cfg);
     manager.init();
+    manager.setState(State::STOP);
 
-    manager.setTargetSpeed(400.0f);
+    MOTOR_ASSERT_EQ(manager.setTargetSpeed(600.0f), Result::Ok);
     MOTOR_ASSERT_NEAR(runtimeSpeedToPhysical(manager.ctx(), manager.ctx().target_rpm),
-                      -400.0f,
+                      -600.0f,
                       1.0e-5f);
 
     MotorTelemetryChannel channels[] = {
@@ -174,20 +175,21 @@ MOTOR_TEST(command_direction_maps_api_speed_and_public_telemetry)
     RuntimeCtx& ctx = manager.ctxMutForTest();
     ctx.speed_rpm = runtimeSpeedFromPhysical(ctx, -123.0f);
     MOTOR_ASSERT_EQ(manager.getTelemetryFloats(channels, 2U, values), 2U);
-    MOTOR_ASSERT_NEAR(values[0], 400.0f, 1.0e-5f);
+    MOTOR_ASSERT_NEAR(values[0], 600.0f, 1.0e-5f);
     MOTOR_ASSERT_NEAR(values[1], 123.0f, 1.0e-5f);
     MOTOR_ASSERT_NEAR(manager.getSpeed(), 123.0f, 1.0e-5f);
 
     MotorDebugData debug{};
     manager.getDebugData(debug);
-    MOTOR_ASSERT_NEAR(debug.target_rpm, 400.0f, 1.0e-5f);
+    MOTOR_ASSERT_NEAR(debug.target_rpm, 600.0f, 1.0e-5f);
 
-    manager.setTargetSpeed(-400.0f);
+    // 当前 API 负方向尚未开放，拒绝后必须保留原目标。
+    MOTOR_ASSERT_EQ(manager.setTargetSpeed(-400.0f), Result::InvalidParam);
     MOTOR_ASSERT_NEAR(runtimeSpeedToPhysical(manager.ctx(), manager.ctx().target_rpm),
-                      400.0f,
+                      -600.0f,
                       1.0e-5f);
     MOTOR_ASSERT_EQ(manager.getTelemetryFloats(channels, 1U, values), 1U);
-    MOTOR_ASSERT_NEAR(values[0], -400.0f, 1.0e-5f);
+    MOTOR_ASSERT_NEAR(values[0], 600.0f, 1.0e-5f);
 }
 
 MOTOR_TEST(command_direction_maps_velocity_setpoint)
@@ -198,19 +200,20 @@ MOTOR_TEST(command_direction_maps_velocity_setpoint)
 
     MotorManager manager(cfg);
     manager.init();
+    manager.setState(State::STOP);
 
     MotionSetpoint sp{};
     sp.mode = Mode::VELOCITY_CONTROL;
-    sp.vel_ff = 250.0f;
-    manager.writeSetpoint(sp);
+    sp.vel_ff = 600.0f;
+    MOTOR_ASSERT_EQ(manager.writeSetpoint(sp), Result::Ok);
     MOTOR_ASSERT_NEAR(runtimeSpeedToPhysical(manager.ctx(), manager.ctx().target_rpm),
-                      -250.0f,
+                      -600.0f,
                       1.0e-5f);
 
     sp.vel_ff = -250.0f;
-    manager.writeSetpoint(sp);
+    MOTOR_ASSERT_EQ(manager.writeSetpoint(sp), Result::InvalidParam);
     MOTOR_ASSERT_NEAR(runtimeSpeedToPhysical(manager.ctx(), manager.ctx().target_rpm),
-                      250.0f,
+                      -600.0f,
                       1.0e-5f);
 }
 
@@ -333,7 +336,7 @@ MOTOR_TEST(hardware_bus_comparator_fault_latches_overcurrent_detail)
     g_raw_v = 0U;
     g_raw_w = 0U;
     g_raw_bus = 0U;
-    g_hw_flags = MOTOR_HAL_HW_FAULT_TIM1_BREAK;
+    g_hw_flags = MOTOR_HAL_HW_FAULT_NONE;
 
     const MotorHAL_t hal = makeDualHal();
     MotorConfig cfg = makeDualConfig(hal);
@@ -341,6 +344,7 @@ MOTOR_TEST(hardware_bus_comparator_fault_latches_overcurrent_detail)
     MotorManager manager(cfg);
     manager.init();
     manager.setState(State::STOP);
+    g_hw_flags = MOTOR_HAL_HW_FAULT_TIM1_BREAK;
     manager.tick();
 
     MOTOR_ASSERT_TRUE(hasFault(manager.fault(), Fault::OVERCURRENT));

@@ -10,14 +10,19 @@ inline void ApplyMotionSafetyConfig(Lib_Motor::MotorConfig& cfg)
     /* ===================== [19] 运动软限幅 ===================== */
     /*
      * 这些是正常控制路径中的软限制, 不等同于硬故障阈值。
-     * max_iq_ref_a:              速度环/转矩模式允许输出的最大 Iq 指令 (A)
+     * max_iq_ref_a:              全部正常控制路径允许的全局 Iq 软上限 (A)
      * iq_slew_rate_a_per_s:      Iq 变化斜率限制 (A/s), 防止负载突变时电流台阶过冲
      * speed_slew_rate_rpm_s:     速度目标斜率限制 (RPM/s), 用于柔和启动/停机
      * torque_speed_guard_band_rpm: 转矩模式接近限速时提前削减同向 Iq 的保护带 (RPM)
+     *
+     * 限幅层级:
+     *   control.speed.output_limit 限制速度 PI 自身输出并参与抗积分饱和;
+     *   max_iq_ref_a 再限制速度/转矩等正常控制路径的 Iq 请求;
+     *   limit.max_phase_current_a 根据实测相电流触发故障, 不作为日常运行指令上限。
      */
     cfg.motion.max_iq_ref_a = 100.0f;
-    cfg.motion.iq_slew_rate_a_per_s = 400.0f;
-    cfg.motion.speed_slew_rate_rpm_s = 1000.0f;
+    cfg.motion.iq_slew_rate_a_per_s = 50.0f;
+    cfg.motion.speed_slew_rate_rpm_s = 200.0f;
     cfg.motion.torque_speed_guard_band_rpm = 100.0f;
 
     /* 双向非对称 Iq 斜率 + 超速故障系数 + 跨零门限 */

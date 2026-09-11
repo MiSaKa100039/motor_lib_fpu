@@ -12,7 +12,7 @@
  *   FORCE_DRAG     — IF profile 内完成对齐和开环强拖
  *   SMO_ONLY       — SMO 无感闭环
  *   HFI_ONLY       — HFI 高频注入 (当前占位, 配置检查会拒绝)
- *   FUSION         — 传感器融合 (未实现)
+ *   FUSION         — 启动角度源到 SMO 的平滑交接
  *
  * 启动流程:
  *   IF + SMO 启动:    FORCE_DRAG(ALIGNMENT + RAMP) → SMO_ONLY
@@ -46,6 +46,8 @@ public:
 private:
     static void handleAlignment(MotorManager& m);
     static void handleForceDrag(MotorManager& m);
+    static bool tryBeginSmoHandover(MotorManager& m, bool allow_transition);
+    static void handleFusion(MotorManager& m);
     static void handleSmo(MotorManager& m);
     static void handleHfi(MotorManager& m);
 };

@@ -52,7 +52,7 @@ uint8_t MotorManager::getTelemetryFloats(const MotorTelemetryChannel* channels,
         }
 #endif
 #if LIB_MOTOR_ENABLE_SMO_OBSERVER
-        if (angle_state_ == AngleState::SMO)
+        if (angle_state_ == AngleState::SMO || angle_state_ == AngleState::FUSION)
         {
 #if LIB_MOTOR_NUMERIC_BACKEND_FIXED_Q15
             return FixedNumeric::toNormalized(ctx_.smo_estimate.pll_error_q15) * PI;
@@ -73,7 +73,7 @@ uint8_t MotorManager::getTelemetryFloats(const MotorTelemetryChannel* channels,
         }
 #endif
 #if LIB_MOTOR_ENABLE_SMO_OBSERVER
-        if (angle_state_ == AngleState::SMO)
+        if (angle_state_ == AngleState::SMO || angle_state_ == AngleState::FUSION)
         {
 #if LIB_MOTOR_NUMERIC_BACKEND_FIXED_Q15
             return runtimeControlVoltageToPhysical(ctx_, ctx_.smo_estimate.signal_level_q15);
@@ -94,7 +94,7 @@ uint8_t MotorManager::getTelemetryFloats(const MotorTelemetryChannel* channels,
         }
 #endif
 #if LIB_MOTOR_ENABLE_SMO_OBSERVER
-        if (angle_state_ == AngleState::SMO)
+        if (angle_state_ == AngleState::SMO || angle_state_ == AngleState::FUSION)
         {
 #if LIB_MOTOR_NUMERIC_BACKEND_FIXED_Q15
             return FixedNumeric::toNormalized(ctx_.smo_estimate.quality_q15);
@@ -115,9 +115,20 @@ uint8_t MotorManager::getTelemetryFloats(const MotorTelemetryChannel* channels,
         }
 #endif
 #if LIB_MOTOR_ENABLE_SMO_OBSERVER
-        if (angle_state_ == AngleState::SMO)
+        if (angle_state_ == AngleState::SMO || angle_state_ == AngleState::FUSION)
         {
             return static_cast<float>(ctx_.smo_estimate.valid_ticks);
+        }
+#endif
+        return 0.0f;
+    };
+
+    const auto getObserverInvalidTicks = [this]() -> float
+    {
+#if LIB_MOTOR_ENABLE_SMO_OBSERVER
+        if (angle_state_ == AngleState::SMO || angle_state_ == AngleState::FUSION)
+        {
+            return static_cast<float>(ctx_.smo_estimate.invalid_ticks);
         }
 #endif
         return 0.0f;
@@ -240,6 +251,22 @@ uint8_t MotorManager::getTelemetryFloats(const MotorTelemetryChannel* channels,
                 break;
             case MotorTelemetryChannel::ObserverConverged:
                 value = (event_.observer_converged != 0U) ? 1.0f : 0.0f;
+                break;
+            case MotorTelemetryChannel::ObserverInvalidTicks:
+                value = getObserverInvalidTicks();
+                break;
+            case MotorTelemetryChannel::SmoHandoverAngleError:
+#if LIB_MOTOR_ENABLE_SMO
+#if LIB_MOTOR_NUMERIC_BACKEND_FIXED_Q15
+                value = runtimeAngleToRadians(
+                    static_cast<RuntimeAngle>(smo_handover_angle_error_phase_));
+#else
+                value = smo_handover_angle_error_rad_;
+#endif
+#endif
+                break;
+            case MotorTelemetryChannel::RunPhaseState:
+                value = static_cast<float>(run_phase_);
                 break;
             case MotorTelemetryChannel::Temperature0:
 #if MOTOR_BUILD_NTC_SLOTS > 0

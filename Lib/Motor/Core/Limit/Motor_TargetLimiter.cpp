@@ -33,7 +33,7 @@ float slewFloat(float current, float target, float max_delta)
  * configuredIqLimit — 获取当前生效的 Iq 软上限 (三级回退)
  *
  * 优先级:
- *   1. cfg.motion.max_iq_ref_a      (用户配置的软限制, 速度环输出上限)
+ *   1. cfg.motion.max_iq_ref_a      (用户配置的全局正常运行 Iq 软上限)
  *   2. cfg.physical.rated_current   (电机额定连续电流)
  *   3. cfg.limit.max_phase_current_a (相线软件过流阈值, 最后兜底)
  */
@@ -48,6 +48,28 @@ float MotorTargetLimiter::configuredIqLimit(const MotorConfig& cfg)
         return cfg.physical.rated_current;
     }
     return cfg.limit.max_phase_current_a;
+}
+
+/*
+ * configuredSpeedPidOutputLimit — 获取速度 PI 的有效 Iq 输出上限
+ *
+ * control.speed.output_limit 是速度环局部上限, 不能越过正常运行 Iq 软上限。
+ * 局部上限未配置(<=0)时回退到全局软上限, 保持浮点与 Q15 后端语义一致。
+ */
+float MotorTargetLimiter::configuredSpeedPidOutputLimit(const MotorConfig& cfg)
+{
+    const float iq_limit = configuredIqLimit(cfg);
+    const float speed_limit = cfg.control.speed.output_limit;
+
+    if (speed_limit <= 0.0f)
+    {
+        return iq_limit;
+    }
+    if (iq_limit <= 0.0f)
+    {
+        return speed_limit;
+    }
+    return (speed_limit < iq_limit) ? speed_limit : iq_limit;
 }
 
 /*

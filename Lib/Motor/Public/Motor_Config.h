@@ -653,6 +653,28 @@ struct MotorEnergyBudget
  *
  *     这里仅保留各观测路径本身需要的参数边界。
  * ========================================================= */
+struct SmoValidityParam
+{
+    float acquire_min_speed_rpm = 500.0f;       // 首次确认有效的最低机械转速
+    float acquire_min_signal_level = 0.0f;      // 首次确认有效的最小反电势幅值
+    float acquire_max_pll_error_rad = 0.35f;    // 首次确认有效的最大 PLL 误差
+    uint16_t acquire_ticks = 100U;               // 严格条件连续成立的 tick 数
+
+    float release_min_speed_rpm = 400.0f;        // 已有效后允许保持的最低机械转速
+    float release_min_signal_level = 0.0f;       // 已有效后允许保持的最小反电势幅值
+    float release_max_pll_error_rad = 0.60f;     // 已有效后允许保持的最大 PLL 误差
+    uint16_t release_ticks = 100U;               // 宽松条件连续失败后才撤销有效
+};
+
+struct SmoHandoverParam
+{
+    float min_speed_rpm = 550.0f;                // 启动源交给 SMO 的最低机械转速
+    float max_angle_error_rad = 0.35f;           // 两角度源交接前的最大相位差
+    float max_speed_error_rpm = 100.0f;          // 两角度源交接前的最大速度差
+    uint16_t confirm_ticks = 100U;                // 交接条件连续成立的 tick 数
+    float blend_time_s = 0.05f;                  // 角度与速度平滑融合时间
+};
+
 struct MotorObserverParam
 {
     /* ==================== [A1] IF 启动参数 ==================== */
@@ -689,26 +711,17 @@ struct MotorObserverParam
     float smo_pll_kp   = 2.0f;   // PLL 比例增益 (跟踪反电动势角度)
     float smo_pll_ki   = 50.0f;  // PLL 积分增益
     float smo_bemf_lpf_cutoff_hz = 1000.0f; // SMO 从滑模注入量提取反电势的一阶低通截止频率 (Hz)
-    float smo_min_signal_level = 0.0f; // SMO 有效所需最小反电势信号, 0 表示关闭
-    float hfi_to_smo_startup_rpm            = 500.0f;  // [P4] 启动期 IF→SMO 单向加速切换速度阈值 (旧 switch_speed_rpm)
-    float hfi_to_smo_startup_hysteresis_rpm = 50.0f;   // [P4] 启动期 IF→SMO 单向切换迟滞 (旧 hysteresis_rpm)
-    float max_handover_error_rad = 0.35f; // 接管前与当前控制角最大允许差
-    uint16_t convergence_ticks = 100;     // SMO 连续有效确认 tick 数
+    SmoValidityParam smo_validity;         // SMO 自身锁定/失锁判据，与启动源无关
+    SmoHandoverParam smo_handover;         // 任意低速启动源交给 SMO 的统一判据
     bool allow_smo_closed_loop = false;   // 允许 SMO 角度真正参与闭环前必须显式打开。
 
-    /* ==================== [C1] 观测器切换阈值 (低速角度源 <-> 高速观测器) ====================
-     * 与启动期字段 hfi_to_smo_startup_rpm/hfi_to_smo_startup_hysteresis_rpm 并存 (P4 改名后):
-     *   - 旧字段: 启动期 IF→SMO 单向加速切换 (handleForceDrag 消费);
-     *   - 本组字段: 稳态运行中的低速源加速交接 + 高速观测器低速降级 (handleSmo/handleHfi 消费);
+    /* ==================== [C1] 运行中角度源自动降级参数 ====================
+     * 首次启动及降级后的再次交接均统一使用 smo_handover；本组只负责稳态低速降级。
      * enable_auto_swap=false 时维持旧的 valid=false 即 Fault 老语义。
-     *
-     * 切换阈值使用建议:
-     *   加速: speed > hfi_to_smo_rpm -> 低速角度源交接给高速观测器;
-     *   减速: speed < smo_to_hfi_rpm -> 高速观测器降级到低速角度源;
-     *   不再等到高速观测器发散才停机, 失效时先尝试降级再 Fault。
+     * hfi_to_smo_rpm 仅保留给运行期策略扩展和 Ke 高速确认，不参与当前交接门控。
      */
     float smo_to_hfi_rpm        = 500.0f;  // 高速观测器减速到该值以下主动降级到低速角度源
-    float hfi_to_smo_rpm        = 800.0f;  // 低速角度源加速到该值以上主动交接给高速观测器
+    float hfi_to_smo_rpm        = 800.0f;  // 运行期策略扩展与 Ke 高速确认的预留阈值
     float switch_hysteresis_rpm = 80.0f;   // 切换阈值迟滞 (RPM), 防边界抖动
     float switch_grace_time_s   = 0.2f;    // 切回失败的超时窗口 (s), 超时置 Fault::OBSERVER_LOSS
     bool  enable_auto_swap      = false;    // 默认关闭, 观测器切换策略调试稳定后再开

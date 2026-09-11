@@ -12,7 +12,8 @@
 namespace Lib_Motor
 {
 
-#if LIB_MOTOR_ENABLE_STALL_PROTECTION || LIB_MOTOR_ENABLE_IF_STARTUP
+#if LIB_MOTOR_ENABLE_STALL_PROTECTION || \
+    (LIB_MOTOR_ENABLE_IF_STARTUP && !LIB_MOTOR_NUMERIC_BACKEND_FIXED_Q15)
 static uint32_t secondsToTicks(float seconds, float dt)
 {
     if (seconds <= 0.0f || dt <= 0.0f) return 0U;
@@ -223,6 +224,9 @@ void MotorManager::prepareModeTransition(Mode previous_mode, Mode next_mode)
     {
         ctx_.speed_ref_limited = 0;
     }
+#if LIB_MOTOR_NUMERIC_BACKEND_FIXED_Q15 && LIB_MOTOR_ENABLE_VELOCITY_CONTROL
+    ctx_.speed_slew_fraction_q16 = 0U;
+#endif
 
 #if LIB_MOTOR_ENABLE_STALL_PROTECTION
     event_.motor_stalled = 0U;
@@ -468,8 +472,12 @@ void MotorManager::processPendingStartupRestart()
         return;
     }
 
+#if LIB_MOTOR_NUMERIC_BACKEND_FIXED_Q15
+    const uint32_t wait_ticks = startup_restart_interval_ticks_;
+#else
     const uint32_t wait_ticks =
         secondsToTicks(active_policy_.startup_restart_interval_s, dt_);
+#endif
     if (wait_ticks > 0U && ++startup_restart_wait_ticks_ < wait_ticks)
     {
         return;
@@ -479,9 +487,6 @@ void MotorManager::processPendingStartupRestart()
     startup_restart_wait_ticks_ = 0U;
     resetIFStartupProfileState();
     resetIFStartupObserverState();
-#if LIB_MOTOR_NUMERIC_BACKEND_FIXED_Q15
-    prepareIFStartupRuntimeForStart();
-#endif
     run_requested_ = (target_mode_ != Mode::NONE);
 }
 #endif

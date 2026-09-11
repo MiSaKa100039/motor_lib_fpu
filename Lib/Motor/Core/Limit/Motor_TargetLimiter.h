@@ -19,6 +19,9 @@ public:
     /* 获取当前生效的 Iq 软上限(A) */
     static float configuredIqLimit(const MotorConfig& cfg);
 
+    /* 获取速度 PI 的有效 Iq 输出上限(A) */
+    static float configuredSpeedPidOutputLimit(const MotorConfig& cfg);
+
     /* 速度目标限幅: 绝对值钳位 + 斜率限制 */
     static float limitSpeedReference(const MotorConfig& cfg,
                                      float dt,

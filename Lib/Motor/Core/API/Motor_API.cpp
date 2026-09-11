@@ -567,8 +567,7 @@ Result MotorAPI::setTargetTorque(float current_a)
     MotionSetpoint sp;
     sp.mode      = Mode::TORQUE_CONTROL;
     sp.torque_ff = current_a;
-    g_motor_pool[id_]->writeSetpoint(sp);
-    return Result::Ok;
+    return g_motor_pool[id_]->writeSetpoint(sp);
 }
 
 /*
@@ -582,8 +581,7 @@ Result MotorAPI::setTargetSpeed(float rpm)
     MotionSetpoint sp;
     sp.mode   = Mode::VELOCITY_CONTROL;
     sp.vel_ff = rpm;
-    g_motor_pool[id_]->writeSetpoint(sp);
-    return Result::Ok;
+    return g_motor_pool[id_]->writeSetpoint(sp);
 }
 
 /*
@@ -599,8 +597,7 @@ Result MotorAPI::setTargetPosition(float angle_rad)
     MotionSetpoint sp;
     sp.mode    = Mode::POSITION_CONTROL;
     sp.pos_ref = angle_rad;
-    g_motor_pool[id_]->writeSetpoint(sp);
-    return Result::Ok;
+    return g_motor_pool[id_]->writeSetpoint(sp);
 }
 
 /*
@@ -613,8 +610,7 @@ Result MotorAPI::writeSetpoint(const MotionSetpoint& sp)
 {
     if (id_ < 0 || g_motor_pool[id_] == nullptr) return Result::InvalidHandle;
     if (isDebugOrCalibApiLocked(g_motor_pool[id_])) return Result::InvalidState;
-    g_motor_pool[id_]->writeSetpoint(sp);
-    return Result::Ok;
+    return g_motor_pool[id_]->writeSetpoint(sp);
 }
 
 /*
@@ -1027,7 +1023,7 @@ Result MotorAPI::debugIFControl(const MotorIFStartupProfile& profile)
 {
     if (debug_locked_) return Result::InvalidState;
     if (id_ < 0 || g_motor_pool[id_] == nullptr) return Result::InvalidHandle;
-    if (!MotorConfigCheck::validIFStartupProfile(&profile)) return Result::InvalidParam;
+    if (!MotorConfigCheck::validDebugIFStartupProfile(&profile)) return Result::InvalidParam;
 
     Result r = checkSafeModeChange(Mode::DEBUG_IF_DRAG);
     if (r != Result::Ok) return r;
@@ -1047,7 +1043,7 @@ Result MotorAPI::debugIFSMOObserver(const MotorIFStartupProfile& profile)
 {
     if (debug_locked_) return Result::InvalidState;
     if (id_ < 0 || g_motor_pool[id_] == nullptr) return Result::InvalidHandle;
-    if (!MotorConfigCheck::validIFStartupProfile(&profile)) return Result::InvalidParam;
+    if (!MotorConfigCheck::validDebugIFStartupProfile(&profile)) return Result::InvalidParam;
 
     Result r = checkSafeModeChange(Mode::DEBUG_IF_SMO_OBSERVER);
     if (r != Result::Ok) return r;
@@ -1070,7 +1066,7 @@ Result MotorAPI::debugIFHFIObserver(const MotorIFStartupProfile& profile)
 {
     if (debug_locked_) return Result::InvalidState;
     if (id_ < 0 || g_motor_pool[id_] == nullptr) return Result::InvalidHandle;
-    if (!MotorConfigCheck::validIFStartupProfile(&profile)) return Result::InvalidParam;
+    if (!MotorConfigCheck::validDebugIFStartupProfile(&profile)) return Result::InvalidParam;
 
     Result r = checkSafeModeChange(Mode::DEBUG_IF_HFI_OBSERVER);
     if (r != Result::Ok) return r;
@@ -1121,7 +1117,8 @@ Result MotorAPI::debugVFControl(float duty, float speed_rpm, float ramp_time_s)
     g_motor_pool[id_]->clearDebugStartupProfiles();
     g_motor_pool[id_]->setDebugRampTime(ramp_time_s);
     g_motor_pool[id_]->setVFDutyBias(duty);
-    g_motor_pool[id_]->setTargetSpeed(speed_rpm);
+    r = g_motor_pool[id_]->setTargetSpeed(speed_rpm);
+    if (r != Result::Ok) return r;
     g_motor_pool[id_]->requestStart();
     return Result::Ok;
 }

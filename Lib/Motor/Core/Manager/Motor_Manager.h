@@ -103,10 +103,10 @@ public:
     void enterIsrDiagnostic(Fault fault);
     void requestStop(StopMode mode = StopMode::COAST);
     void requestEmergencyStop();
-    void setTargetSpeed(float rpm);
+    Result setTargetSpeed(float rpm);
     void setTargetTorque(float current_a);
     void setTargetId(float current_a);
-    void writeSetpoint(const MotionSetpoint& sp);
+    Result writeSetpoint(const MotionSetpoint& sp);
 
     /* === 本地 FIFO/trigger 同步回放 ===
      * 实现见 Motor_ManagerAPI.cpp: BuildCfg 关闭时返回 NotSupported, 开启后使用固定容量 FIFO。
@@ -182,6 +182,17 @@ public:
 #if MOTOR_LIB_HOST_TEST
     RuntimeCtx& ctxMutForTest() { return ctx_; }
     MotorEvent& eventMutForTest() { return event_; }
+    void setActiveModeForTest(Mode mode)
+    {
+        mode_ = mode;
+        target_mode_ = mode;
+    }
+    RuntimeCurrent computeIqReferenceForTest() { return computeIqReference(); }
+    void clearDerivedTargetsForTest() { clearDerivedTargets(); }
+    float speedPidOutputLimitForTest() const
+    {
+        return controller_.pid_speed.outputLimit();
+    }
 #if LIB_MOTOR_ENABLE_DEBUG_IF_ANY
     bool stepDebugIFProfileForTest(float& speed_rpm, float& id_ref, float& iq_ref);
     bool debugIFProfileCompleteForTest() const
@@ -200,6 +211,11 @@ public:
     bool startupRestartPendingForTest() const { return startup_restart_pending_; }
     uint8_t startupRestartAttemptsForTest() const { return startup_restart_attempts_; }
     bool runRequestedForTest() const { return run_requested_; }
+    bool ifProfileHoldTargetForTest() const { return if_profile_hold_target_; }
+    bool ifStartupProfileCompleteForTest() const { return ifStartupProfileComplete(); }
+#endif
+#if LIB_MOTOR_ENABLE_SMO && LIB_MOTOR_NUMERIC_BACKEND_FIXED_Q15
+    uint16_t smoFusionProgressQ15ForTest() const { return smo_fusion_progress_q15_; }
 #endif
 #endif
     const MotorRunPolicy& defaultPolicy() const { return config_.default_run_policy; }
@@ -327,8 +343,10 @@ mutable MotorConfig config_;   // mutable: 运行期辨识流程可写 physical.
 #endif
 #if LIB_MOTOR_ENABLE_IF_STARTUP
     uint32_t startup_restart_wait_ticks_ = 0U;
+    uint32_t startup_restart_interval_ticks_ = 0U;
     uint8_t  startup_restart_attempts_ = 0U;
     bool     startup_restart_pending_ = false;
+    bool     if_profile_hold_target_ = false;
 #endif
 
     /* ======================== 主控制链 ======================== */
@@ -353,7 +371,7 @@ mutable MotorConfig config_;   // mutable: 运行期辨识流程可写 physical.
     void  syncRuntimeInputs(float id_ref, float iq_ref);
     void  syncRuntimeTargets();
     void  publishRuntimeOutputs();
-    void  applySetpoint(const MotionSetpoint& sp);
+    Result applySetpoint(const MotionSetpoint& sp);
     void  resetSetpointPlayback();
     void  serviceSetpointPlayback();
     Result appendSetpointPlaybackSegment(const MotionSetpoint* seg, uint16_t count);
@@ -399,6 +417,26 @@ mutable MotorConfig config_;   // mutable: 运行期辨识流程可写 physical.
 #if LIB_MOTOR_ENABLE_SMO_OBSERVER
     SlidingModeObserver smo_;
     int8_t smo_angle_direction_ = 0;
+#if LIB_MOTOR_ENABLE_SMO
+    uint16_t smo_handover_confirm_ticks_ = 0U;
+    uint32_t smo_fusion_ticks_ = 0U;
+    uint32_t smo_fusion_total_ticks_ = 1U;
+#if LIB_MOTOR_NUMERIC_BACKEND_FIXED_Q15
+    int32_t smo_fusion_angle_offset_q15_ = 0;
+    uint16_t smo_fusion_progress_q15_ = 0U;
+    uint16_t smo_fusion_step_q15_ = 0U;
+    uint32_t smo_fusion_remainder_q15_ = 0U;
+    uint32_t smo_fusion_remainder_accum_ = 0U;
+#else
+    float smo_fusion_angle_offset_rad_ = 0.0f;
+#endif
+    RuntimeSpeed smo_fusion_start_speed_ = 0;
+#if LIB_MOTOR_NUMERIC_BACKEND_FIXED_Q15
+    uint32_t smo_handover_angle_error_phase_ = 0U;
+#else
+    float smo_handover_angle_error_rad_ = 0.0f;
+#endif
+#endif
 #endif
 #if LIB_MOTOR_ENABLE_HFI
     HighFreqInjectionObserver hfi_;
@@ -421,9 +459,10 @@ mutable MotorConfig config_;   // mutable: 运行期辨识流程可写 physical.
     /* ======================== 调试辅助 ======================== */
 #if LIB_MOTOR_ENABLE_IF_STARTUP
     void resetIFStartupProfileState();
+    void prepareIFStartupRuntimeForStart();
 #if LIB_MOTOR_NUMERIC_BACKEND_FIXED_Q15
     bool prepareIFStartupProfileSnapshot(const MotorIFStartupProfile* profile);
-    void prepareIFStartupRuntimeForStart();
+    void cacheIFStartupRestartInterval();
     bool getIFStartupProfileCommand(RuntimeSpeed& speed_rpm,
                                     RuntimeCurrent& id_ref,
                                     RuntimeCurrent& iq_ref);

@@ -56,13 +56,14 @@ inline void ApplyControlConfig(Lib_Motor::MotorConfig& cfg)
     /*
      * 速度环输出 = Iq 指令(A), 然后再进入 q 轴电流环。
      *
-     * output_limit 跟随 motion.max_iq_ref_a:
-     *   这样平台只需要维护一处“正常运行最大 Iq”。
-     *   若后续单独开放速度环输出上限, 可在这里直接填固定值。
+     * output_limit 是速度 PI 的局部 Iq 上限, 用于输出钳位和抗积分饱和。
+     * 实际生效值为 min(output_limit, motion.max_iq_ref_a 的三级回退值);
+     * output_limit<=0 时回退到全局 Iq 软上限。该值不是相电流故障阈值。
+     * 当前配置跟随 motion.max_iq_ref_a, 后续可直接填固定值形成更低的速度环上限。
      */
     cfg.control.speed.kp = 0.12f;
     cfg.control.speed.ki = 0.02f;
-    cfg.control.speed.output_limit =(cfg.motion.max_iq_ref_a > 0.0f) ? cfg.motion.max_iq_ref_a : 100.0f;
+    cfg.control.speed.output_limit =(cfg.motion.max_iq_ref_a > 0.0f) ? cfg.motion.max_iq_ref_a : 50.0f;
 
     /* [P5 预留] 速度环自动推导 - 本轮 ConfigCheck 仍拒绝 auto_derive_speed_pid=true
      * 推导需 cfg.physical.load_inertia > 0 与 torque_constant > 0, 本工程填 0。

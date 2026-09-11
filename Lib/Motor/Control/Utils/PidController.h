@@ -96,9 +96,9 @@ public:
             return;
         }
 
-        kp_q15_ = FixedNumeric::fromNormalized((param_.kp * input_base) / output_base);
+        kp_q15_ = coefficientToQ15((param_.kp * input_base) / output_base);
         ki_per_tick_q15_ =
-            FixedNumeric::fromNormalized((param_.ki * dt * input_base) / output_base);
+            coefficientToQ15((param_.ki * dt * input_base) / output_base);
 
         const std::int32_t limit_q30 = static_cast<std::int32_t>(output_limit_q15_) << 15U;
         if (reset_integrator)
@@ -131,24 +131,44 @@ public:
 
     FixedNumeric::q15_t update(FixedNumeric::q15_t error, bool hold_integral)
     {
-        const std::int32_t proportional_q30 =
-            static_cast<std::int32_t>(kp_q15_) * error;
+        const std::int64_t proportional_q30 =
+            static_cast<std::int64_t>(kp_q15_) * error;
         const std::int32_t limit_q30 = static_cast<std::int32_t>(output_limit_q15_) << 15U;
         if (!hold_integral)
         {
-            integrator_q30_ = FixedNumeric::clamp32(
-                integrator_q30_ + static_cast<std::int32_t>(ki_per_tick_q15_) * error,
-                -limit_q30,
-                limit_q30);
+            const std::int64_t integral_next =
+                static_cast<std::int64_t>(integrator_q30_) +
+                static_cast<std::int64_t>(ki_per_tick_q15_) * error;
+            integrator_q30_ = clampQ30(integral_next, limit_q30);
         }
 
-        const std::int32_t unclamped =
+        const std::int64_t unclamped_wide =
             (proportional_q30 + integrator_q30_) >> 15U;
+        const std::int32_t unclamped =
+            (unclamped_wide > INT32_MAX) ? INT32_MAX :
+            ((unclamped_wide < INT32_MIN) ? INT32_MIN :
+             static_cast<std::int32_t>(unclamped_wide));
         const std::int32_t clamped =
             FixedNumeric::clamp32(unclamped, -output_limit_q15_, output_limit_q15_);
         saturated_ = (clamped != unclamped);
         output_q15_ = FixedNumeric::saturateQ15(clamped);
         return output_q15_;
+    }
+
+    void preloadOutputQ15(FixedNumeric::q15_t error,
+                          FixedNumeric::q15_t desired_output)
+    {
+        const std::int32_t limit_q30 = static_cast<std::int32_t>(output_limit_q15_) << 15U;
+        const std::int64_t proportional_q30 =
+            static_cast<std::int64_t>(kp_q15_) * error;
+        const std::int64_t desired_q30 =
+            static_cast<std::int64_t>(desired_output) * 32768LL;
+        integrator_q30_ = clampQ30(desired_q30 - proportional_q30, limit_q30);
+        output_q15_ = FixedNumeric::saturateQ15(
+            FixedNumeric::clamp32(desired_output,
+                                  -output_limit_q15_,
+                                  output_limit_q15_));
+        saturated_ = false;
     }
 
     FixedNumeric::q15_t getOutputQ15() const { return output_q15_; }
@@ -159,9 +179,29 @@ public:
     float outputLimit() const { return param_.output_limit; }
 
 private:
+    static std::int32_t coefficientToQ15(float value)
+    {
+        if (!std::isfinite(value)) return 0;
+        /* 先限制输入再缩放，避免 float 转 int32 越界，也不引入 double helper。 */
+        constexpr float kPositiveLimit = 65535.0f;
+        constexpr float kNegativeLimit = -65535.0f;
+        if (value >= kPositiveLimit) return INT32_MAX;
+        if (value <= kNegativeLimit) return INT32_MIN;
+        const float scaled = value * 32768.0f;
+        return static_cast<std::int32_t>(
+            scaled >= 0.0f ? scaled + 0.5f : scaled - 0.5f);
+    }
+
+    static std::int32_t clampQ30(std::int64_t value, std::int32_t limit)
+    {
+        if (value > limit) return limit;
+        if (value < -static_cast<std::int64_t>(limit)) return -limit;
+        return static_cast<std::int32_t>(value);
+    }
+
     PIDParam param_{};
-    FixedNumeric::q15_t kp_q15_ = 0;
-    FixedNumeric::q15_t ki_per_tick_q15_ = 0;
+    std::int32_t kp_q15_ = 0;
+    std::int32_t ki_per_tick_q15_ = 0;
     FixedNumeric::q15_t output_limit_q15_ = 0;
     std::int32_t integrator_q30_ = 0;
     FixedNumeric::q15_t output_q15_ = 0;
@@ -237,6 +277,23 @@ private:
 
         prev_error_ = error;
         return output_;
+    }
+
+    void preloadOutput(float error, float desired_output)
+    {
+        const float p = kp_ * error;
+        integral_ = desired_output - p;
+        if (limit_ > 0.0f)
+        {
+            integral_ = std::max(-limit_, std::min(limit_, integral_));
+            output_ = std::max(-limit_, std::min(limit_, desired_output));
+        }
+        else
+        {
+            output_ = desired_output;
+        }
+        prev_error_ = error;
+        saturated_ = false;
     }
 
     float getOutput()   const { return output_; }

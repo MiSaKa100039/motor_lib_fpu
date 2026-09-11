@@ -1,6 +1,7 @@
 #include "MotorTestRunner.h"
 #include "Motor_Runtime.h"
 #include "Observer_SMO.h"
+#include "PidController.h"
 #include <limits>
 #include <initializer_list>
 
@@ -136,4 +137,59 @@ MOTOR_TEST(smo_q15_angle_branch_uses_internal_direction)
     MOTOR_ASSERT_EQ(runtimeCorrectSmoAngleForDirection(raw, 1),
                     static_cast<FixedNumeric::phase_u32_t>(raw + 0x80000000UL));
     MOTOR_ASSERT_EQ(runtimeCorrectSmoAngleForDirection(raw, -1), raw);
+}
+
+MOTOR_TEST(q15_unsigned_blend_scales_signed_values_without_int64)
+{
+    MOTOR_ASSERT_EQ(FixedNumeric::scaleSignedByUnsignedQ15(65535, 0U), 0);
+    MOTOR_ASSERT_EQ(FixedNumeric::scaleSignedByUnsignedQ15(65535, 16384U), 32768);
+    MOTOR_ASSERT_EQ(FixedNumeric::scaleSignedByUnsignedQ15(65535, 32768U), 65535);
+    MOTOR_ASSERT_EQ(FixedNumeric::scaleSignedByUnsignedQ15(-65535, 16384U), -32768);
+    MOTOR_ASSERT_EQ(FixedNumeric::scaleSignedByUnsignedQ15(-32768, 32768U), -32768);
+}
+
+MOTOR_TEST(smo_validity_uses_release_hysteresis_before_unlocking)
+{
+    auto smo = makeSmo();
+    smo.setValidityCriteria(0.0f,
+                            3.14159265358979323846f,
+                            2U,
+                            0.0f,
+                            1000.0f,
+                            3.14159265358979323846f,
+                            2U,
+                            0.0f);
+
+    ObserverEstimateQ15 estimate{};
+    smo.update(0, 0, 0, 0, &estimate); // 初始化电流模型
+    smo.update(0, 0, 0, 0, &estimate);
+    MOTOR_ASSERT_TRUE(!estimate.valid);
+    smo.update(0, 0, 0, 0, &estimate);
+    MOTOR_ASSERT_TRUE(estimate.valid);
+    MOTOR_ASSERT_EQ(estimate.invalid_ticks, 0U);
+
+    smo.update(0, 0, 0, 0, &estimate);
+    MOTOR_ASSERT_TRUE(estimate.valid);
+    MOTOR_ASSERT_EQ(estimate.invalid_ticks, 1U);
+    smo.update(0, 0, 0, 0, &estimate);
+    MOTOR_ASSERT_TRUE(!estimate.valid);
+    MOTOR_ASSERT_EQ(estimate.invalid_ticks, 2U);
+}
+
+MOTOR_TEST(q15_speed_pid_preserves_gain_above_one_normalized)
+{
+    PIDParam param{};
+    param.kp = 0.12f;
+    param.ki = 0.0f;
+    param.output_limit = 100.0f;
+    PidController pid;
+    pid.init(param);
+    pid.configureFixed(5000.0f, 100.0f, 1.0f / 12000.0f, 100.0f, true);
+
+    const auto output = pid.update(FixedNumeric::fromNormalized(0.10f), true);
+    MOTOR_ASSERT_NEAR(FixedNumeric::toPhysical(output, 100.0f), 60.0f, 0.02f);
+
+    const auto preload = FixedNumeric::fromPhysical(1.2f, 100.0f);
+    pid.preloadOutputQ15(0, preload);
+    MOTOR_ASSERT_EQ(pid.update(0, true), preload);
 }

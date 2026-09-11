@@ -53,3 +53,25 @@ Lib_Motor::MotorVFStartupProfile Platform_TestVFStartupProfile = {
 };
 #endif
 
+#if LIB_MOTOR_ENABLE_DEBUG_IF_ANY
+/*
+ * IF 调试启动曲线：首段执行转子对齐，后续段执行开环拖动。
+ * Platform_TestIFStartupPhases 用于在调试器中修改阶段参数；
+ * Platform_TestIFStartupProfile.phase_count 用于选择实际启用的阶段数。
+ * phase_count=1 时仅执行对齐并持续保持最终定位电流，直到手动停机。
+ * fixed-Q15 在每次启动时生成快照，参数修改后需停止并重新启动才会生效。
+ */
+volatile Lib_Motor::MotorIFStartupPhase Platform_TestIFStartupPhases[] = {
+    Lib_Motor::MotorIFStartupPhase::Alignment(0.50f, 0.80f, 15.00f),
+    Lib_Motor::MotorIFStartupPhase::Ramp(1.50f,  400.0f, 0.00f, 10.0f),
+    Lib_Motor::MotorIFStartupPhase::Ramp(2.00f, 200.0f, 0.00f, 0.70f),
+    Lib_Motor::MotorIFStartupPhase::Ramp(2.00f, 400.0f, 0.00f, 1.00f),
+    Lib_Motor::MotorIFStartupPhase::Ramp(1.50f, 600.0f, 0.00f, 1.20f),
+};
+
+Lib_Motor::MotorIFStartupProfile Platform_TestIFStartupProfile = {
+    Platform_TestIFStartupPhases,
+    2U
+};
+#endif
+

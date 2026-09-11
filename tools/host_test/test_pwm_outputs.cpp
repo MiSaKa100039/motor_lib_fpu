@@ -33,6 +33,22 @@ void expectTimingPreserved(const TIM_TypeDef& t)
     MOTOR_ASSERT_TRUE(!t.mode_changed_while_enabled);
     MOTOR_ASSERT_TRUE(!t.unsafe_enable);
 }
+void expectPowerOutputsOff(const TIM_TypeDef& t)
+{
+    for (unsigned i = 0; i < 3; ++i)
+    {
+        MOTOR_ASSERT_TRUE(!MockTim::mainOutputActive(&t, i));
+        MOTOR_ASSERT_TRUE(!MockTim::complementaryOutputActive(&t, i));
+    }
+}
+void expectLowSideBrakeActive(const TIM_TypeDef& t)
+{
+    for (unsigned i = 0; i < 3; ++i)
+    {
+        MOTOR_ASSERT_TRUE(!MockTim::mainOutputActive(&t, i));
+        MOTOR_ASSERT_TRUE(MockTim::complementaryOutputActive(&t, i));
+    }
+}
 }
 
 MOTOR_TEST(pwm_brake_only_enables_lows_and_preserves_adc_timing)
@@ -40,12 +56,30 @@ MOTOR_TEST(pwm_brake_only_enables_lows_and_preserves_adc_timing)
     auto t = runningTimer();
     LCA039_PWM_BrakeLow(&t, true);
     MOTOR_ASSERT_EQ(t.CCER & 0x555, 0x444U);
-    for (unsigned i = 0; i < 3; ++i) MOTOR_ASSERT_EQ(MockTim::mode(&t, i), 0x40U);
+    for (unsigned i = 0; i < 3; ++i)
+    {
+        MOTOR_ASSERT_EQ(MockTim::mode(&t, i), TIM_ForcedAction_Active);
+    }
+    expectLowSideBrakeActive(t);
     MOTOR_ASSERT_EQ(t.BDTR & TIM_BDTR_MOE, TIM_BDTR_MOE);
     MOTOR_ASSERT_EQ(t.moe_writes, 0U);
     LCA039_PWM_BrakeLow(&t, true);
     MOTOR_ASSERT_EQ(t.CCER & 0x555, 0x444U);
+    expectLowSideBrakeActive(t);
     MOTOR_ASSERT_EQ(t.moe_writes, 0U);
+    expectTimingPreserved(t);
+}
+
+MOTOR_TEST(pwm_coast_and_low_side_brake_have_distinct_effective_outputs)
+{
+    auto t = runningTimer();
+    LCA039_PWM_Disable(&t);
+    MOTOR_ASSERT_EQ(t.CCER & 0x555, 0U);
+    expectPowerOutputsOff(t);
+
+    LCA039_PWM_BrakeLow(&t, true);
+    MOTOR_ASSERT_EQ(t.CCER & 0x555, 0x444U);
+    expectLowSideBrakeActive(t);
     expectTimingPreserved(t);
 }
 
@@ -64,6 +98,7 @@ MOTOR_TEST(pwm_brake_denied_or_break_latched_stays_off)
         MOTOR_ASSERT_EQ(t.BDTR, bdtr);
         MOTOR_ASSERT_EQ(t.SR, sr);
         MOTOR_ASSERT_EQ(t.moe_writes, 0U);
+        expectPowerOutputsOff(t);
         expectTimingPreserved(t);
     }
 }
@@ -80,6 +115,7 @@ MOTOR_TEST(pwm_break_during_brake_switching_cannot_reenable_moe)
         MOTOR_ASSERT_EQ(t.CCER & 0x555, 0U);
         MOTOR_ASSERT_EQ(t.moe_writes, 0U);
         MOTOR_ASSERT_TRUE((t.SR & TIM_FLAG_Break) != 0);
+        expectPowerOutputsOff(t);
         expectTimingPreserved(t);
     }
 }
@@ -90,6 +126,7 @@ MOTOR_TEST(pwm_release_and_restart_restore_safe_active_compares)
     LCA039_PWM_BrakeLow(&t, true);
     LCA039_PWM_Disable(&t);
     MOTOR_ASSERT_EQ(t.CCER & 0x555, 0U);
+    expectPowerOutputsOff(t);
     LCA039_PWM_Enable(&t);
     MOTOR_ASSERT_EQ(t.CCER & 0x555, 0x555U);
     for (unsigned i = 0; i < 3; ++i)

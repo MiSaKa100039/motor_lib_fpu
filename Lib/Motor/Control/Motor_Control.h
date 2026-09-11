@@ -152,6 +152,11 @@ public:
         pid_speed.reset();
     }
 
+    void setSpeedOutputLimit(float limit)
+    {
+        pid_speed.setOutputLimit(limit);
+    }
+
     void resetCurrentPid()
     {
         pid_d.reset();
@@ -179,9 +184,15 @@ public:
         pid_q.setOutputLimitQ15(limit);
     }
 
-    void syncFixedSpeedPid(const MotorConfig& cfg, float dt, float output_limit_a)
+    void syncFixedSpeedPid(const MotorConfig& cfg,
+                           float dt,
+                           float effective_output_limit_a)
     {
-        pid_speed.configureFixed(speedBase(cfg), currentBase(cfg), dt, output_limit_a, false);
+        pid_speed.configureFixed(speedBase(cfg),
+                                 currentBase(cfg),
+                                 dt,
+                                 effective_output_limit_a,
+                                 false);
     }
 
     FixedNumeric::q15_t updateFixedCurrentD(FixedNumeric::q15_t error)
@@ -200,6 +211,18 @@ public:
             FixedNumeric::fromPhysical(speed_error_rpm, speedBase(cfg));
         const FixedNumeric::q15_t output = pid_speed.update(error, hold_integral);
         return FixedNumeric::toPhysical(output, currentBase(cfg));
+    }
+
+    FixedNumeric::q15_t updateFixedSpeedQ15(FixedNumeric::q15_t speed_error,
+                                            bool hold_integral)
+    {
+        return pid_speed.update(speed_error, hold_integral);
+    }
+
+    void preloadFixedSpeedOutputQ15(FixedNumeric::q15_t speed_error,
+                                    FixedNumeric::q15_t iq_output)
+    {
+        pid_speed.preloadOutputQ15(speed_error, iq_output);
     }
 
 #if LIB_MOTOR_ENABLE_POSITION_CONTROL

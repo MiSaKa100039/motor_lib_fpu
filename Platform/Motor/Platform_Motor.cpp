@@ -112,8 +112,3 @@ Lib_Motor::Result Platform_Motor_ResetRuntimeAndSampling(void)
     g_platform_motor_hardware_started = true;
     return Global_Motor_0.reset();
 }
-
-const Lib_Motor::MotorIFStartupProfile& Platform_Motor_GetIFStartupProfile(void)
-{
-    return Platform_MotorConfig::Platform_NormalIFStartupProfile;
-}

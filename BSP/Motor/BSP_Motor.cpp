@@ -78,6 +78,7 @@ void BSP_ResetVofaTelemetryGate(bool enabled)
     BSP_RestoreIrq(primask);
 }
 
+#if !LIB_MOTOR_NUMERIC_BACKEND_FIXED_Q15
 float BSP_ClampDuty_Impl(float value)
 {
     if (value < 0.0f) return 0.0f;
@@ -95,6 +96,7 @@ uint16_t BSP_DutyToCompare_Impl(float duty, bool inverted)
     if (compare > static_cast<float>(period)) compare = static_cast<float>(period);
     return static_cast<uint16_t>(compare);
 }
+#endif
 
 static int16_t BSP_ClampDutyQ15_Impl(int16_t value)
 {
@@ -128,6 +130,7 @@ void BSP_PWM_DisablePowerChannels_Impl()
  * LC32 Core 层负责真实 TIM1 CCR 写入；BSP 只做归一化 duty 到计数值的换算，
  * 并在硬件绑定确认前强制关闭桥臂输出。
  */
+#if !LIB_MOTOR_NUMERIC_BACKEND_FIXED_Q15
 void BSP_SetPWM_Impl(float u, float v, float w)
 {
     const uint16_t compare_u = BSP_DutyToCompare_Impl(u, kPhaseUOutputInverted);
@@ -142,6 +145,7 @@ void BSP_SetPWM_Impl(float u, float v, float w)
 
     Core_TIM1_SetPwmCompare(compare_u, compare_v, compare_w);
 }
+#endif
 
 void BSP_SetPWM_Q15_Impl(int16_t u, int16_t v, int16_t w)
 {
@@ -271,7 +275,11 @@ void BSP_ExitCritical_Impl()
 }
 
 Lib_Motor::MotorHAL_t bsp_hal_impl{
+#if LIB_MOTOR_NUMERIC_BACKEND_FIXED_Q15
+    nullptr,
+#else
     BSP_SetPWM_Impl,
+#endif
     BSP_PWM_Enable_Impl,
     BSP_PWM_Disable_Impl,
     BSP_PWM_Coast_Impl,
